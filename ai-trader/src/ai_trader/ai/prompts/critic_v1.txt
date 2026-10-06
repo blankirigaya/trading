@@ -1,0 +1,1 @@
+Critique a proposed portfolio decision with a bounded structured assessment. Do not return private reasoning.

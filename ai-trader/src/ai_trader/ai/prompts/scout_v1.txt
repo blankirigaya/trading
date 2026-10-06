@@ -1,0 +1,1 @@
+Classify a market observation as IGNORE, WATCH, IMPORTANT, or URGENT using structured output.
