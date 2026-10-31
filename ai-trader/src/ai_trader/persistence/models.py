@@ -1,12 +1,31 @@
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from sqlalchemy import DateTime, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy.types import JSON
+from sqlalchemy.types import JSON, TypeDecorator
 
 JSONType = JSON().with_variant(JSONB, "postgresql")
+
+
+class UTCDateTime(TypeDecorator[datetime]):
+    """A timestamp that is always tz-aware UTC in Python.
+
+    SQLite drops tzinfo on round-trip, which used to leak naive datetimes that
+    browsers then rendered as local time. Postgres (timestamptz) is unaffected.
+    Values are written unchanged; naive values read back are UTC wall time.
+    """
+
+    impl = DateTime(timezone=True)
+    cache_ok = True
+
+    def process_result_value(
+        self, value: datetime | None, dialect: object
+    ) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value
 
 
 class Base(DeclarativeBase):
@@ -18,7 +37,7 @@ class EventRow(Base):
     event_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     correlation_id: Mapped[str] = mapped_column(String(64), index=True)
     event_type: Mapped[str] = mapped_column(String(80), index=True)
-    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    occurred_at: Mapped[datetime] = mapped_column(UTCDateTime(timezone=True), index=True)
     raw_payload: Mapped[dict[str, object]] = mapped_column(JSONType)
 
 
@@ -28,7 +47,7 @@ class DecisionRow(Base):
     correlation_id: Mapped[str] = mapped_column(String(64), index=True)
     event_id: Mapped[str] = mapped_column(String(64), index=True)
     status: Mapped[str] = mapped_column(String(40), index=True)
-    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    timestamp: Mapped[datetime] = mapped_column(UTCDateTime(timezone=True), index=True)
     input_context_hash: Mapped[str] = mapped_column(String(64))
     initial_proposal: Mapped[dict[str, object]] = mapped_column(JSONType)
     final_decision: Mapped[dict[str, object] | None] = mapped_column(JSONType, nullable=True)
@@ -42,7 +61,7 @@ class DecisionRow(Base):
     instrument_key: Mapped[str | None] = mapped_column(String(80), nullable=True)
     market_snapshot_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     market_timestamp: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        UTCDateTime(timezone=True), nullable=True
     )
     ai_server: Mapped[str | None] = mapped_column(String(160), nullable=True)
     ai_model: Mapped[str | None] = mapped_column(String(120), nullable=True)
@@ -53,6 +72,9 @@ class DecisionRow(Base):
     prompt_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
     reconsideration_requested: Mapped[bool] = mapped_column(default=False)
     reconsideration_performed: Mapped[bool] = mapped_column(default=False)
+    reconsideration_provider_metadata: Mapped[dict[str, object] | None] = mapped_column(
+        JSONType, nullable=True
+    )
     safety_allowed: Mapped[bool | None] = mapped_column(nullable=True)
     safety_reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -87,14 +109,14 @@ class PositionRow(Base):
     symbol: Mapped[str] = mapped_column(String(40), index=True)
     quantity: Mapped[int]
     average_entry_price: Mapped[Decimal] = mapped_column(Numeric(18, 4))
-    snapshot_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    snapshot_at: Mapped[datetime] = mapped_column(UTCDateTime(timezone=True), index=True)
 
 
 class GenericPayloadRow(Base):
     __abstract__ = True
     id: Mapped[int] = mapped_column(primary_key=True)
     payload: Mapped[dict[str, object]] = mapped_column(JSONType)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(timezone=True), index=True)
 
 
 class NewsRow(GenericPayloadRow):

@@ -59,3 +59,28 @@ class MarketState(BaseModel):
     recent_1m_candles: list[Candle] = Field(default_factory=list)
     bid: Decimal | None = None
     ask: Decimal | None = None
+
+
+def stale_data_reason(
+    state: MarketState, now: datetime, max_age_seconds: int
+) -> str | None:
+    """Return why ``state`` must not drive a review/trade, or None if it may.
+
+    A review is only allowed when the AI would see a fresh, complete picture:
+    a positive last price, a current OHLCV candle, and a tick received within
+    ``max_age_seconds``. Anything less skips the review instead of trading blind.
+    """
+    if state.last_price <= 0:
+        return f"no usable last price for {state.instrument.symbol}"
+    if state.current_1m_candle is None:
+        return f"no current OHLCV candle for {state.instrument.symbol}"
+    if not state.recent_ticks:
+        return f"no ticks for {state.instrument.symbol}"
+    latest = max(tick.received_timestamp for tick in state.recent_ticks)
+    age = (now - latest).total_seconds()
+    if age > max_age_seconds:
+        return (
+            f"market data for {state.instrument.symbol} is {age:.0f}s old "
+            f"(limit {max_age_seconds}s)"
+        )
+    return None

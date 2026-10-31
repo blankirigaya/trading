@@ -2,8 +2,15 @@
 
 Resolves configured symbols to HSM topics and wires the socket to the market-state
 service. FYERS objects do not leave this package.
+
+The feed resolves the whole candidate master list up front (so a later universe
+switch can subscribe without another symbol-token round trip) but only subscribes
+to the symbols the session currently asks for. A switch replaces the topic set
+and drops the live socket; ``run`` reconnects and subscribes to the new set.
 """
 
+import logging
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from decimal import Decimal
 
@@ -12,8 +19,15 @@ from ai_trader.domain.common import Clock, SystemClock
 from ai_trader.domain.market import Instrument, MarketState
 from ai_trader.integrations.fyers.auth import FyersAuth
 from ai_trader.integrations.fyers.client import FyersDataSocket
-from ai_trader.integrations.fyers.instruments import parse_symbol, to_instrument
+from ai_trader.integrations.fyers.instruments import (
+    InvalidFyersSymbol,
+    hsm_token_suffix,
+    parse_symbol,
+    to_instrument,
+)
 from ai_trader.integrations.fyers.market_data import FyersMarketDataService
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -25,6 +39,10 @@ class FyersFeed:
     instruments: dict[str, Instrument]
     topics: list[str] = field(default_factory=list)
     topic_to_symbol: dict[str, str] = field(default_factory=dict)
+    # Every resolved symbol (the full candidate list), so the session can move
+    # the subscription between universes without re-resolving tokens.
+    symbol_to_topic: dict[str, str] = field(default_factory=dict)
+    all_topic_to_symbol: dict[str, str] = field(default_factory=dict)
 
     def latest(self) -> MarketState | None:
         for topic in self.topics:
@@ -40,6 +58,34 @@ class FyersFeed:
     def states(self) -> list[MarketState]:
         return [state for topic in self.topics if (state := self.service.latest(topic)) is not None]
 
+    async def quote_prices(self, symbols: Iterable[str]) -> dict[str, Decimal]:
+        """REST quotes for the master list, independent of the socket topics."""
+        return await self.socket.auth.quotes(symbols)
+
+    async def subscribe_symbols(self, symbols: Iterable[str]) -> bool:
+        """Point the socket at a new symbol set; returns True when it changed.
+
+        The service already knows every resolved instrument, so the new topics
+        decode without rebuilding it. ``reconnect`` drops the live session and
+        lets ``run`` resubscribe; it is a no-op before the first connection.
+        """
+        wanted: list[str] = []
+        for symbol in symbols:
+            topic = self.symbol_to_topic.get(symbol.upper())
+            if topic is not None and topic not in wanted:
+                wanted.append(topic)
+        if wanted == self.topics:
+            return False
+        self.topics = wanted
+        self.topic_to_symbol = {
+            topic: self.all_topic_to_symbol[topic]
+            for topic in wanted
+            if topic in self.all_topic_to_symbol
+        }
+        await self.socket.subscribe(wanted, self.topic_to_symbol)
+        await self.socket.reconnect()
+        return True
+
 
 def build_auth(settings: Settings) -> FyersAuth:
     return FyersAuth(
@@ -54,30 +100,69 @@ async def build_feed(
     settings: Settings,
     symbols: list[str] | None = None,
     clock: Clock | None = None,
+    market_sink: Callable[[list[MarketState]], None] | None = None,
+    master: Iterable[str] | None = None,
 ) -> FyersFeed:
-    """Resolve symbols to HSM topics and prepare the market data service."""
-    auth = build_auth(settings)
-    wanted = symbols or list(settings.shadow_symbols)
-    parsed = [parse_symbol(symbol) for symbol in wanted]
+    """Resolve symbols to HSM topics and prepare the market data service.
 
-    tokens = await auth.hsm_symbols([item.text for item in parsed])
+    ``master`` is the full candidate list to resolve (the review universe is a
+    price-based subset of it). Only ``symbols`` is subscribed initially.
+    ``market_sink`` is called with every batch of decoded ticks, on the socket
+    task. That keeps the UI's snapshot store current at tick speed instead of
+    review speed; a slow sink must never block ingestion, so keep it cheap.
+    """
+    auth = build_auth(settings)
+    wanted = list(symbols or settings.shadow_symbols)
+    desired = list(dict.fromkeys([*wanted, *(master or ())]))
+
+    parsed_items = []
+    for text in desired:
+        try:
+            parsed_items.append(parse_symbol(text))
+        except InvalidFyersSymbol:
+            logger.warning("FYERS symbol %r is not parseable; skipping", text)
+
+    tokens = await auth.hsm_symbols([item.text for item in parsed_items])
     instruments: dict[str, Instrument] = {}
-    topic_to_symbol: dict[str, str] = {}
-    topics: list[str] = []
-    for item in parsed:
+    symbol_to_topic: dict[str, str] = {}
+    all_topic_to_symbol: dict[str, str] = {}
+    for item in parsed_items:
         token = tokens.get(item.text)
         if token is None:
-            raise LookupError(f"FYERS did not resolve an exchange token for {item.text}")
+            # One delisted/renamed ticker must not kill the whole session:
+            # skip it loudly so the watchlist visibly shrinks instead of the
+            # backend refusing to start.
+            logger.warning(
+                "FYERS did not resolve an exchange token for %s; skipping", item.text
+            )
+            continue
         topic = item.hsm_topic(token)
-        topics.append(topic)
-        topic_to_symbol[topic] = item.text
-        instruments[topic] = to_instrument(item.text, token)
+        instruments[topic] = to_instrument(item.text, hsm_token_suffix(token))
+        symbol_to_topic[item.text.upper()] = topic
+        all_topic_to_symbol[topic] = item.text
+
+    initial = [
+        wanted_topic
+        for symbol in wanted
+        if (wanted_topic := symbol_to_topic.get(symbol.upper())) is not None
+    ]
+    topics = list(dict.fromkeys(initial))
+    topic_to_symbol = {
+        topic: all_topic_to_symbol[topic]
+        for topic in topics
+        if topic in all_topic_to_symbol
+    }
 
     service = FyersMarketDataService(instruments, clock or SystemClock())
 
+    if not topics:
+        raise LookupError("FYERS resolved none of the configured symbols")
+
     def on_frame(connection_id: str, payload: bytes) -> None:
         """Socket callback: decode only. Never awaits a reviewer."""
-        service.ingest_frame(connection_id, payload)
+        states = service.ingest_frame(connection_id, payload)
+        if states and market_sink is not None:
+            market_sink(states)
 
     socket = FyersDataSocket(
         auth,
@@ -85,4 +170,12 @@ async def build_feed(
         feed_mode=settings.fyers_feed_mode,
     )
     await socket.subscribe(topics, topic_to_symbol)
-    return FyersFeed(service, socket, instruments, topics, topic_to_symbol)
+    return FyersFeed(
+        service=service,
+        socket=socket,
+        instruments=instruments,
+        topics=topics,
+        topic_to_symbol=topic_to_symbol,
+        symbol_to_topic=symbol_to_topic,
+        all_topic_to_symbol=all_topic_to_symbol,
+    )

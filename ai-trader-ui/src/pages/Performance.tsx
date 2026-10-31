@@ -19,7 +19,9 @@ export function Performance() {
         <div className="card-title">Paper P&amp;L</div>
         <div className="stat-grid">
           <Stat label="Total P&L" value={formatSignedInr(data.total_pnl)} testId="perf-total-pnl" />
-          <Stat label="Realized P&L" value={formatSignedInr(data.realized_pnl)} />
+          <Stat label="Realized P&L (net)" value={formatSignedInr(data.realized_pnl)} testId="perf-realized-pnl" />
+          <Stat label="Charges paid" value={formatInr(data.charges_paid)} tone="neg" testId="perf-charges-paid" />
+          <Stat label="Gross realized P&L" value={formatSignedInr(data.gross_realized_pnl)} testId="perf-gross-pnl" />
           <Stat label="Unrealized P&L" value={formatSignedInr(data.unrealized_pnl)} />
           <Stat label="Cash" value={formatInr(data.cash)} />
           <Stat label="Open positions" value={data.open_positions} />

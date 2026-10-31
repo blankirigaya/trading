@@ -1,6 +1,8 @@
+import asyncio
 from decimal import Decimal
+from typing import cast
 
-from sqlalchemy import select
+from sqlalchemy import Table, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -14,7 +16,21 @@ from ai_trader.domain.decisions import (
 from ai_trader.domain.orders import Order
 from ai_trader.domain.portfolio import PortfolioState
 from ai_trader.journal.service import DecisionJournal, DecisionRecord
-from ai_trader.persistence.models import CritiqueRow, DecisionRow
+from ai_trader.persistence.models import Base, CritiqueRow, DecisionRow
+from ai_trader.persistence.retry import with_sqlite_retry
+
+
+def ensure_journal_tables(engine: Engine) -> None:
+    """Create the decision journal tables if they are absent.
+
+    Same rationale as ensure_news_tables: a fresh SQLite database (new local
+    runs, tests) must be able to start a session without a migration step.
+    Alembic owns schema changes; this only fills the gap for new files.
+    """
+    Base.metadata.create_all(
+        engine,
+        tables=cast("list[Table]", [DecisionRow.__table__, CritiqueRow.__table__]),
+    )
 
 
 class SqlDecisionJournal(DecisionJournal):
@@ -28,6 +44,13 @@ class SqlDecisionJournal(DecisionJournal):
         self.engine = engine
 
     async def save(self, record: DecisionRecord) -> None:
+        # Synchronous SQLAlchemy must never run on the event loop: a slow disk
+        # or a locked SQLite file would freeze HTTP serving for every client.
+        # Retries absorb transient contention; a lost record must not kill the
+        # review loop right after its order was filled.
+        await with_sqlite_retry("journal.save", self._save_sync, record)
+
+    def _save_sync(self, record: DecisionRecord) -> None:
         with Session(self.engine) as session:
             values = self._row_values(record)
             row = session.get(DecisionRow, record.decision_id)
@@ -47,13 +70,22 @@ class SqlDecisionJournal(DecisionJournal):
             session.commit()
 
     async def get(self, decision_id: str) -> DecisionRecord | None:
+        return await asyncio.to_thread(self._get_sync, decision_id)
+
+    def _get_sync(self, decision_id: str) -> DecisionRecord | None:
         with Session(self.engine) as session:
             row = session.get(DecisionRow, decision_id)
             return self._to_domain(row) if row else None
 
-    async def list_recent(self) -> list[DecisionRecord]:
+    async def list_recent(self, limit: int | None = None) -> list[DecisionRecord]:
+        return await asyncio.to_thread(self._list_recent_sync, limit)
+
+    def _list_recent_sync(self, limit: int | None) -> list[DecisionRecord]:
         with Session(self.engine) as session:
-            rows = session.scalars(select(DecisionRow).order_by(DecisionRow.timestamp.desc())).all()
+            query = select(DecisionRow).order_by(DecisionRow.timestamp.desc())
+            if limit is not None:
+                query = query.limit(limit)
+            rows = session.scalars(query).all()
             return [self._to_domain(row) for row in rows]
 
     def _row_values(self, record: DecisionRecord) -> dict[str, object]:
@@ -96,6 +128,11 @@ class SqlDecisionJournal(DecisionJournal):
             "prompt_version": ai_meta.prompt_version,
             "reconsideration_requested": record.reconsideration_requested,
             "reconsideration_performed": record.reconsideration_performed,
+            "reconsideration_provider_metadata": record.reconsideration_provider_metadata.model_dump(
+                mode="json"
+            )
+            if record.reconsideration_provider_metadata
+            else None,
             "safety_allowed": record.safety_allowed,
             "safety_reason": record.safety_reason,
             "failure_reason": record.failure_reason,
@@ -133,6 +170,11 @@ class SqlDecisionJournal(DecisionJournal):
             symbol=row.symbol,
             reconsideration_requested=row.reconsideration_requested,
             reconsideration_performed=row.reconsideration_performed,
+            reconsideration_provider_metadata=ProviderMetadata.model_validate(
+                row.reconsideration_provider_metadata
+            )
+            if row.reconsideration_provider_metadata
+            else None,
             safety_allowed=row.safety_allowed,
             safety_reason=row.safety_reason,
             failure_reason=row.failure_reason,

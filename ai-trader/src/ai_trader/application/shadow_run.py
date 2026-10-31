@@ -10,16 +10,17 @@ successful autonomous decision.
 
 from dataclasses import dataclass
 
-from ai_trader.ai.jev import TypeSafeJevCritic
-from ai_trader.ai.portfolio_manager import PortfolioManagerAgent
-from ai_trader.ai.remote_model import OpenAICompatibleAIProvider
+from ai_trader.ai.jev import build_critic
+from ai_trader.ai.portfolio_manager import PortfolioManagerAgent, position_limits_text
+from ai_trader.ai.providers import build_ai_provider
 from ai_trader.ai.retries import RetryingAIProvider
 from ai_trader.application.workflows.shadow_review import ShadowReviewWorkflow
+from ai_trader.brokers.charges import charge_rates_for
 from ai_trader.brokers.paper import PaperBroker
 from ai_trader.config import Settings
 from ai_trader.domain.common import SystemClock
 from ai_trader.domain.decisions import TradeProposal
-from ai_trader.domain.market import MarketState
+from ai_trader.domain.market import MarketState, stale_data_reason
 from ai_trader.execution.service import ExecutionService
 from ai_trader.integrations.connectivity import (
     probe_ai,
@@ -28,6 +29,8 @@ from ai_trader.integrations.connectivity import (
 )
 from ai_trader.integrations.fyers.probe import probe_fyers
 from ai_trader.journal.service import DecisionJournal, DecisionRecord
+from ai_trader.persistence.control_models import ensure_control_tables
+from ai_trader.persistence.control_store import ControlStore
 from ai_trader.persistence.database import create_database_engine
 from ai_trader.persistence.repositories import SqlDecisionJournal
 from ai_trader.safety.envelope import KillSwitch, SafetyEnvelope
@@ -49,11 +52,15 @@ async def run_integration_gate(
     """Run all three independent probes. No mock fallback is permitted here."""
     market = await probe_configured_market(settings, symbols)
     ai = await probe_ai(settings)
-    jev = await probe_jev(settings)
+    if not settings.jev_enabled:
+        jev = GateResult(True, ["jev: disabled by configuration (JEV_ENABLED=false)"])
+    else:
+        jev_probe = await probe_jev(settings)
+        jev = GateResult(jev_probe.ok, jev_probe.lines)
     return (
         GateResult(market[0], market[1]),
         GateResult(ai.ok, ai.lines),
-        GateResult(jev.ok, jev.lines),
+        jev,
     )
 
 
@@ -83,35 +90,65 @@ async def run_once_shadow(
     else:
         legacy = await probe_market(settings, symbols[0] if symbols else None)
         market_states = [legacy.state] if legacy.state else []
-    state = market_states[0] if market_states else None
-    if state is None:
-        raise RuntimeError(
-            f"{GATE_MARKET} did not produce a decoded MarketState; refusing to run the workflow"
-        )
+    now = SystemClock().now()
+    board = [
+        price_state
+        for price_state in sorted(market_states, key=lambda s: s.instrument.symbol)
+        if stale_data_reason(price_state, now, settings.max_market_data_age_seconds) is None
+    ]
+    if not board:
+        if not market_states:
+            raise RuntimeError(
+                f"{GATE_MARKET} did not produce a decoded MarketState; refusing to run the workflow"
+            )
+        raise RuntimeError(f"refusing to run blind: {stale_data_reason(market_states[0], now, settings.max_market_data_age_seconds)}")
+    state = board[0]
 
     clock = SystemClock()
 
     engine = create_database_engine(settings.database_url)
     journal: DecisionJournal = SqlDecisionJournal(engine)
+    ensure_control_tables(engine)
+    capital_cap_disabled = ControlStore(engine).get_capital_cap_disabled_sync(
+        settings.capital_cap_disabled
+    )
+    position_count_cap_disabled = ControlStore(engine).get_position_count_cap_disabled_sync(
+        settings.position_count_cap_disabled
+    )
 
     # Hard execution isolation: PaperBroker only, regardless of any broker configuration.
-    broker = PaperBroker(settings.shadow_initial_capital_inr, clock)
+    broker = PaperBroker(
+        settings.shadow_initial_capital_inr,
+        clock,
+        margin_multiple=settings.paper_margin_multiple,
+        charge_rates=charge_rates_for(settings),
+    )
     for price_state in market_states:
         broker.set_price(price_state.instrument.symbol, price_state.last_price)
-    safety = SafetyEnvelope(settings, KillSwitch(), clock)
-
-    remote_provider = OpenAICompatibleAIProvider(
-        settings.ai_base_url,
-        settings.ai_model,
-        settings.ai_api_key,
-        settings.ai_timeout_seconds,
-        settings.ai_max_concurrent_requests,
+    safety = SafetyEnvelope(
+        settings,
+        KillSwitch(),
+        clock,
+        capital_cap_disabled=capital_cap_disabled,
+        position_count_cap_disabled=position_count_cap_disabled,
     )
+
+    remote_provider = build_ai_provider(settings, cadence=True)
     provider = RetryingAIProvider(remote_provider, settings.ai_schema_max_retries)
 
+    critic = build_critic(settings)
+
     workflow = ShadowReviewWorkflow(
-        PortfolioManagerAgent(provider, "v2"),
-        TypeSafeJevCritic(settings.jev_base_url, settings.jev_api_key or "", settings.jev_model),
+        PortfolioManagerAgent(
+            provider,
+            "v11",
+            position_limits=position_limits_text(
+                settings,
+                capital_cap_disabled=capital_cap_disabled,
+                position_count_cap_disabled=position_count_cap_disabled,
+            ),
+        ),
+        critic,
         broker,
         safety,
         ExecutionService(broker),
@@ -119,11 +156,15 @@ async def run_once_shadow(
         clock,
     )
     try:
-        record = await workflow.run(state)
+        record = await workflow.run(state, board=board)
     finally:
         await remote_provider.aclose()
         engine.dispose()
-    return record, journal, state
+    exec_state = next(
+        (price_state for price_state in board if price_state.instrument.symbol == (record.symbol or "")),
+        state,
+    )
+    return record, journal, exec_state
 
 
 def format_acceptance(state: MarketState, record: DecisionRecord, persisted: bool) -> str:
@@ -140,7 +181,13 @@ def format_acceptance(state: MarketState, record: DecisionRecord, persisted: boo
 
     def allocation_of(proposal: TradeProposal | None) -> str:
         value = proposal.capital_allocation_inr if proposal else None
-        return f"{value:.2f} INR" if value is not None else "n/a"
+        if value is None:
+            return "n/a"
+        shares = proposal.quantity_shares if proposal else None
+        if shares is None and state.last_price > 0:
+            shares = int(value // state.last_price)
+        suffix = f" ({shares} shares)" if shares else ""
+        return f"{value:.2f} INR{suffix}"
 
     lines = [
         "MARKET",

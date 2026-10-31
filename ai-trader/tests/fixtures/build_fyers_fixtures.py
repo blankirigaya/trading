@@ -55,19 +55,51 @@ UPDATE_VALUES: dict[str, int] = {
 LITE_VALUE = {"ltp": 150180}
 
 
-def _datafeed_frame(
-    message_num: int, data_type: int, values: list[int], topic: str = TOPIC
-) -> bytes:
-    """Assemble one datafeed frame: header, scrip payload, then i32 values."""
-    topic_bytes = topic.encode()
+def _scrip_payload(
+    data_type: int,
+    values: list[int],
+    topic: str = TOPIC,
+    topic_id: int = 1,
+    with_name: bool = True,
+) -> bytearray:
+    """Assemble one scrip payload: type, topic id, optional name, then i32 values."""
     payload = bytearray()
     payload.append(data_type)
-    payload.extend(struct.pack(">H", 3045))
-    payload.append(len(topic_bytes))
-    payload.extend(topic_bytes)
+    payload.extend(struct.pack("<H", topic_id))
+    if with_name:
+        topic_bytes = topic.encode()
+        payload.append(len(topic_bytes))
+        payload.extend(topic_bytes)
     payload.append(len(values))
     for value in values:
         payload.extend(struct.pack(">i", value))
+    if data_type == DataType.SNAPSHOT:
+        # Live snapshots append a multiplier, a precision, two reserved bytes,
+        # and three labelled strings (exchange, exchange token, symbol).
+        payload.extend(struct.pack(">H", 1))
+        payload.append(2)
+        payload.extend(b"\x01\x02")
+        for label in ("NSE", str(topic_id), topic):
+            encoded = label.encode()
+            payload.append(len(encoded))
+            payload.extend(encoded)
+    return payload
+
+
+def _datafeed_frame(
+    message_num: int,
+    data_type: int,
+    values: list[int],
+    topic: str = TOPIC,
+    topic_id: int = 1,
+    with_name: bool = True,
+) -> bytes:
+    """Assemble one datafeed frame: header, scrip payload, then i32 values.
+
+    Only snapshot frames carry the topic name; update and lite frames carry the
+    numeric topic id (little-endian), exactly as the live server sends them.
+    """
+    payload = _scrip_payload(data_type, values, topic, topic_id, with_name)
 
     frame = bytearray()
     frame.extend((1).to_bytes(2, "big"))  # declared length (server-defined)
@@ -78,19 +110,46 @@ def _datafeed_frame(
     return bytes(frame)
 
 
+def _multi_snapshot_frame() -> bytes:
+    """Two snapshot scrips in one frame, as the live server sends on subscribe."""
+    payload = _scrip_payload(
+        DataType.SNAPSHOT, _values_for(DATA_VAL_FIELDS, SNAPSHOT_VALUES),
+        TOPIC, 1, True,
+    )
+    payload.extend(
+        _scrip_payload(
+            DataType.SNAPSHOT, _values_for(DATA_VAL_FIELDS, SNAPSHOT_VALUES),
+            "sf|nse_cm|1594", 2, True,
+        )
+    )
+    frame = bytearray()
+    frame.extend((1).to_bytes(2, "big"))
+    frame.append(0x06)
+    frame.extend((4).to_bytes(4, "big"))
+    frame.extend((2).to_bytes(2, "big"))
+    frame.extend(payload)
+    return bytes(frame)
+
+
 def _values_for(schema: tuple[str, ...], source: dict[str, int]) -> list[int]:
     return [source[name] for name in schema if name in source]
 
 
 def main() -> None:
     snapshot = _datafeed_frame(1, DataType.SNAPSHOT, _values_for(DATA_VAL_FIELDS, SNAPSHOT_VALUES))
-    update = _datafeed_frame(2, DataType.UPDATE, _values_for(DATA_VAL_FIELDS, UPDATE_VALUES))
-    lite = _datafeed_frame(3, DataType.LITE, _values_for(LITE_VAL_FIELDS, LITE_VALUE))
+    update = _datafeed_frame(
+        2, DataType.UPDATE, _values_for(DATA_VAL_FIELDS, UPDATE_VALUES), with_name=False
+    )
+    lite = _datafeed_frame(
+        3, DataType.LITE, _values_for(LITE_VAL_FIELDS, LITE_VALUE), with_name=False
+    )
+    multi = _multi_snapshot_frame()
 
     for name, payload in (
         ("fyers_snapshot.bin", snapshot),
         ("fyers_update.bin", update),
         ("fyers_lite.bin", lite),
+        ("fyers_multi_snapshot.bin", multi),
     ):
         (HERE / name).write_bytes(payload)
         print(f"wrote {name} ({len(payload)} bytes)")

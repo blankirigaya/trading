@@ -10,6 +10,7 @@ const LINKS: { to: string; label: string; group: string }[] = [
   { to: '/trades', label: 'Trades', group: 'Paper Trading' },
   { to: '/decisions', label: 'Decisions', group: 'AI Reasoning' },
   { to: '/performance', label: 'Performance', group: 'AI Reasoning' },
+  { to: '/bots', label: 'Bots', group: 'AI Reasoning' },
   { to: '/system', label: 'System', group: 'Control' },
 ]
 

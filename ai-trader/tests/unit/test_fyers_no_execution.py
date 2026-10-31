@@ -102,9 +102,11 @@ def test_fyers_session_broker_is_paper(clock) -> None:
     feed = FyersFeed(service, socket, {"sf|nse_cm|3045": instrument}, ["sf|nse_cm|3045"], {})
 
     session = build_session(_settings(), feed, clock=clock)
-    assert isinstance(session.broker, PaperBroker)
-    assert isinstance(session.workflow.broker, PaperBroker)
-    assert session.workflow.execution.broker is session.broker
+    assert session.shards, "expected at least one shard"
+    for shard in session.shards:
+        assert isinstance(shard.broker, PaperBroker)
+        assert isinstance(shard.workflow.broker, PaperBroker)
+        assert shard.workflow.execution.broker is shard.broker
 
 
 def test_execution_service_in_session_is_paper_backed(clock) -> None:
@@ -123,9 +125,11 @@ def test_execution_service_in_session_is_paper_backed(clock) -> None:
         {},
     )
     session = build_session(_settings(), feed, clock=clock)
-    assert isinstance(session.workflow.execution, ExecutionService)
-    assert isinstance(session.workflow.execution.broker, PaperBroker)
-    assert not isinstance(session.workflow.execution.broker, FyersBroker)
+    assert session.shards, "expected at least one shard"
+    for shard in session.shards:
+        assert isinstance(shard.workflow.execution, ExecutionService)
+        assert isinstance(shard.workflow.execution.broker, PaperBroker)
+        assert not isinstance(shard.workflow.execution.broker, FyersBroker)
 
 
 def test_fyers_package_exposes_no_order_endpoint() -> None:

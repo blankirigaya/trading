@@ -103,7 +103,7 @@ class EmptyJournal(DecisionJournal):
     async def get(self, decision_id: str) -> DecisionRecord | None:
         return None
 
-    async def list_recent(self) -> list[DecisionRecord]:
+    async def list_recent(self, limit: int | None = None) -> list[DecisionRecord]:
         return []
 
 
@@ -245,7 +245,7 @@ def build_workflow(
     settings: Settings, broker: PaperBroker, ai: RecordingAI, clock: SystemClock
 ) -> ShadowReviewWorkflow:
     return ShadowReviewWorkflow(
-        PortfolioManagerAgent(ai, "v2"),
+        PortfolioManagerAgent(ai, "v4"),
         AgreeingCritic(),
         broker,
         SafetyEnvelope(settings, KillSwitch(), clock),
@@ -288,7 +288,7 @@ def test_news_concerning_a_held_position_is_marked_in_the_prompt(
     broker = PaperBroker(Decimal("100000"), clock)
     broker.set_price("INFY", Decimal("1500"))
     ai = RecordingAI()
-    manager = PortfolioManagerAgent(ai, "v2")
+    manager = PortfolioManagerAgent(ai, "v4")
 
     portfolio = PortfolioState(
         cash=Decimal("1000"),
@@ -318,10 +318,12 @@ def test_held_position_news_prompt_offers_the_ai_every_outcome(
 def test_no_news_means_the_prompt_is_unchanged() -> None:
     """With no news the agent must not switch prompts or alter the context."""
     ai = RecordingAI()
-    manager = PortfolioManagerAgent(ai, "v2")
+    manager = PortfolioManagerAgent(ai, "v4")
     portfolio = PortfolioState(cash=Decimal("100000"))
 
     asyncio.run(manager.review(make_tick(), portfolio, None))
     prompt = ai.prompts[0]
     assert "ORIGINAL SOURCE INFORMATION" not in prompt
     assert "RECENT NEWS CONTEXT" not in prompt
+
+

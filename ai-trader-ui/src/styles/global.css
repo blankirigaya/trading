@@ -326,6 +326,43 @@ tr.clickable {
 .neg {
   color: var(--bad);
 }
+
+/* Tick flash: remount the price span (keyed by price) so the animation runs
+   on every up/down tick. Proves the screen is live even in a slow market. */
+@keyframes tick-up {
+  0% { color: var(--ok); text-shadow: 0 0 8px var(--ok); }
+  100% { color: inherit; text-shadow: none; }
+}
+@keyframes tick-down {
+  0% { color: var(--bad); text-shadow: 0 0 8px var(--bad); }
+  100% { color: inherit; text-shadow: none; }
+}
+.tick-up {
+  animation: tick-up 0.9s ease-out;
+}
+.tick-down {
+  animation: tick-down 0.9s ease-out;
+}
+
+/* Liveness dot: pulses while a snapshot poll is in flight (~every second),
+   so a frozen feed reads as a still dot even when prices sit unchanged. */
+.live-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ok);
+  opacity: 0.45;
+  margin-right: 6px;
+  vertical-align: 1px;
+}
+.live-dot.fetching {
+  animation: live-pulse 0.8s ease-in-out infinite;
+}
+@keyframes live-pulse {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; box-shadow: 0 0 6px var(--ok); }
+}
 .dim {
   color: var(--text-dim);
 }

@@ -24,3 +24,6 @@ class AIProvider(ABC):
         prompt_name: str,
         prompt_version: str,
     ) -> tuple[T, ProviderMetadata]: ...
+
+    async def aclose(self) -> None:  # noqa: B027 - the default implementation is intentionally concrete
+        """Release provider resources. Providers without connections use this no-op."""

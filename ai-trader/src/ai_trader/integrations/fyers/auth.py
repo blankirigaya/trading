@@ -5,6 +5,9 @@ Credentials are read from settings only. No secret is logged, stored, or echoed.
 
 import base64
 import json
+import logging
+from collections.abc import Iterable, Iterator
+from decimal import Decimal
 
 import httpx
 
@@ -12,6 +15,21 @@ DEFAULT_API_BASE_URL = "https://api-t1.fyers.in"
 DEFAULT_DATA_WS_URL = "wss://socket.fyers.in/hsm/v1-5/prod"
 CHANNEL = 11
 CLIENT_SOURCE = "ai-trader/0.2"
+# FYERS caps both symbol-token and quote requests at 50 symbols per call.
+MAX_SYMBOLS_PER_REQUEST = 50
+
+logger = logging.getLogger(__name__)
+
+
+def _chunks(items: Iterable[str], size: int) -> Iterator[list[str]]:
+    batch: list[str] = []
+    for item in items:
+        batch.append(item)
+        if len(batch) >= size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
 
 
 class MissingFyersCredential(RuntimeError):
@@ -66,17 +84,87 @@ class FyersAuth:
         body: dict[str, object] = response.json()
         return body
 
-    async def hsm_symbols(self, symbols: list[str]) -> dict[str, int]:
-        """Resolve trading symbols such as ``NSE:INFY-EQ`` to HSM exchange tokens."""
-        payload = await self._get("/data/symbol-token", {"symbols": ",".join(symbols)})
-        resolved = payload.get("symbol_token")
-        if not isinstance(resolved, list):
-            raise LookupError("FYERS symbol-token response did not contain symbol_token")
-        return {
-            str(entry["symbol"]): int(entry["token"])
-            for entry in resolved
-            if isinstance(entry, dict) and "symbol" in entry and "token" in entry
-        }
+    async def _post(self, path: str, payload: dict[str, object]) -> dict[str, object]:
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.post(
+                f"{self.api_base_url}{path}",
+                headers={
+                    "Authorization": self.authorization_header,
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+            response.raise_for_status()
+        body: dict[str, object] = response.json()
+        return body
+
+    async def hsm_symbols(self, symbols: list[str]) -> dict[str, str]:
+        """Resolve trading symbols such as ``NSE:INFY-EQ`` to raw FYERS tokens.
+
+        Returns the exchange token strings verbatim (``10100000001594``); the
+        HSM topic uses the segment prefix and token suffix derived from them.
+        Requests are chunked because the endpoint accepts at most 50 symbols.
+        """
+        resolved: dict[str, str] = {}
+        failure: LookupError | None = None
+        for chunk in _chunks(dict.fromkeys(symbols), MAX_SYMBOLS_PER_REQUEST):
+            try:
+                payload = await self._post("/data/symbol-token", {"symbols": chunk})
+            except Exception as exc:  # noqa: BLE001 - one bad batch must not stop the rest
+                failure = LookupError(f"FYERS symbol-token request failed: {exc}")
+                logger.warning(
+                    "FYERS symbol-token batch of %d failed; continuing with other batches",
+                    len(chunk),
+                )
+                continue
+            valid = payload.get("validSymbol")
+            if not isinstance(valid, dict) or not valid:
+                failure = LookupError(
+                    "FYERS symbol-token response did not contain validSymbol"
+                )
+                continue
+            resolved.update({str(symbol): str(token) for symbol, token in valid.items()})
+        if not resolved:
+            raise failure or LookupError(
+                "FYERS symbol-token response did not contain validSymbol"
+            )
+        return resolved
+
+    async def quotes(self, symbols: Iterable[str]) -> dict[str, Decimal]:
+        """Latest traded price per FYERS wire symbol.
+
+        Used to classify the broad master list by live price. Symbols FYERS does
+        not resolve (or has no quote for) are simply absent from the result.
+        """
+        prices: dict[str, Decimal] = {}
+        for chunk in _chunks(dict.fromkeys(symbols), MAX_SYMBOLS_PER_REQUEST):
+            try:
+                payload = await self._get("/data/quotes", {"symbols": ",".join(chunk)})
+            except Exception:  # noqa: BLE001 - partial quotes still classify the rest
+                logger.warning(
+                    "FYERS quote batch of %d failed; using the remaining quotes", len(chunk)
+                )
+                continue
+            rows = payload.get("d")
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                name = row.get("n")
+                values = row.get("v")
+                if not isinstance(name, str) or not isinstance(values, dict):
+                    continue
+                last_price = values.get("lp")
+                if last_price is None:
+                    continue
+                try:
+                    price = Decimal(str(last_price))
+                except ArithmeticError:
+                    continue
+                if price > 0:
+                    prices[name.upper()] = price
+        return prices
 
 
 def _b64url_decode(segment: str) -> bytes:

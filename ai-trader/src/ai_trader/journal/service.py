@@ -36,6 +36,7 @@ class DecisionRecord(BaseModel):
     symbol: str | None = None
     reconsideration_requested: bool = False
     reconsideration_performed: bool = False
+    reconsideration_provider_metadata: ProviderMetadata | None = None
     safety_allowed: bool | None = None
     safety_reason: str | None = None
     failure_reason: str | None = None
@@ -50,7 +51,7 @@ class DecisionJournal(ABC):
     async def get(self, decision_id: str) -> DecisionRecord | None: ...
 
     @abstractmethod
-    async def list_recent(self) -> list[DecisionRecord]: ...
+    async def list_recent(self, limit: int | None = None) -> list[DecisionRecord]: ...
 
 
 class InMemoryDecisionJournal(DecisionJournal):
@@ -63,5 +64,8 @@ class InMemoryDecisionJournal(DecisionJournal):
     async def get(self, decision_id: str) -> DecisionRecord | None:
         return self.records.get(decision_id)
 
-    async def list_recent(self) -> list[DecisionRecord]:
-        return list(self.records.values())
+    async def list_recent(self, limit: int | None = None) -> list[DecisionRecord]:
+        records = list(self.records.values())
+        if limit is not None:
+            records = records[-limit:]
+        return records

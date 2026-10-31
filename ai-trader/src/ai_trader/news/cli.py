@@ -2,7 +2,7 @@
 
 import asyncio
 
-from ai_trader.ai.remote_model import OpenAICompatibleAIProvider
+from ai_trader.ai.providers import build_ai_provider
 from ai_trader.ai.retries import RetryingAIProvider
 from ai_trader.config import Settings
 from ai_trader.news.pipeline import poll_sources
@@ -26,17 +26,12 @@ def _build_intelligence(settings: Settings) -> NewsIntelligence:
     engine = create_database_engine(settings.database_url)
     repository = NewsRepository(engine)
     provider = None
-    if settings.ai_base_url and settings.ai_model:
-        provider = RetryingAIProvider(
-            OpenAICompatibleAIProvider(
-                settings.ai_base_url,
-                settings.ai_model,
-                settings.ai_api_key,
-                settings.ai_timeout_seconds,
-                settings.ai_max_concurrent_requests,
-            ),
-            settings.news_ai_max_retries,
-        )
+    try:
+        base_provider = build_ai_provider(settings)
+    except ValueError:
+        base_provider = None
+    if base_provider is not None:
+        provider = RetryingAIProvider(base_provider, settings.news_ai_max_retries)
     return NewsIntelligence(settings, repository, provider)
 
 
@@ -104,7 +99,10 @@ def news_analyse_latest(settings: Settings, limit: int = 5) -> int:
         print("No stored news items. Run 'news poll --once' first.")
         return 1
     if intelligence.ai_provider is None:
-        print("AI not configured: set AI_BASE_URL and AI_MODEL. No analysis was fabricated.")
+        if settings.ai_provider.strip().lower() == "bedrock":
+            print("Bedrock is not configured: set BEDROCK_MODEL_ID. No analysis was fabricated.")
+        else:
+            print("AI not configured: set AI_BASE_URL and AI_MODEL. No analysis was fabricated.")
         return 1
 
     analyses = asyncio.run(intelligence.analyse_latest(limit=limit))

@@ -1,6 +1,8 @@
+import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import { Badge, Empty, Stat } from '@/components/common/Primitives'
+import { UniverseSwitcher } from '@/components/common/UniverseSwitcher'
 import { DecisionDetail } from '@/components/decisions/DecisionDetail'
 import { LiveNewsFeed } from '@/components/news/LiveNews'
 import { NewsLatencyTable } from '@/components/news/NewsLatency'
@@ -11,13 +13,34 @@ import { usePerformance } from '@/hooks/usePortfolio'
 import { usePortfolio } from '@/hooks/usePortfolio'
 import { useSystemStatus } from '@/hooks/useSystemStatus'
 import {
+  formatDuration,
   formatInr,
   formatInteger,
   formatPrice,
   formatSignedInr,
+  formatTokens,
+  formatUsd,
   pctChange,
   toNumber,
 } from '@/utils/format'
+
+/** Ticking clock for freshness labels; a frozen poll must look frozen. */
+function useNow(intervalMs = 1_000): number {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), intervalMs)
+    return () => clearInterval(timer)
+  }, [intervalMs])
+  return now
+}
+
+function snapshotAgeSeconds(snapshots: { timestamp: string }[] | undefined, now: number): number | null {
+  const times = (snapshots ?? [])
+    .map((snapshot) => Date.parse(snapshot.timestamp))
+    .filter((value) => Number.isFinite(value))
+  if (!times.length) return null
+  return Math.max(0, (now - Math.max(...times)) / 1000)
+}
 
 function PortfolioSummary() {
   const { data: portfolio, isLoading } = usePortfolio()
@@ -34,7 +57,12 @@ function PortfolioSummary() {
       0,
     )
   const starting = toNumber(status?.shadow_initial_capital_inr) || cash + invested
-  const total = cash + toNumber(portfolio.unrealized_pnl)
+  // Equity comes from the backend: a paper BUY only removes margin from cash, so
+  // cash + unrealized understates the book by the margin still tied up.
+  const total =
+    portfolio.equity === undefined
+      ? cash + toNumber(portfolio.unrealized_pnl)
+      : toNumber(portfolio.equity)
   const today = toNumber(portfolio.realized_pnl) + toNumber(portfolio.unrealized_pnl)
 
   return (
@@ -67,6 +95,7 @@ function PortfolioSummary() {
 function OpenPositions() {
   const { data: portfolio } = usePortfolio()
   const { data: snapshots } = useMarketSnapshots()
+  const prevPrices = useRef(new Map<string, number>())
   const priceBySymbol = new Map(
     (snapshots ?? []).map((snapshot) => [snapshot.instrument.symbol, snapshot.last_price]),
   )
@@ -97,6 +126,9 @@ function OpenPositions() {
             {positions.map((position) => {
               const avg = toNumber(position.average_entry_price)
               const ltp = toNumber(priceBySymbol.get(position.symbol) ?? avg)
+              const prev = prevPrices.current.get(position.symbol)
+              prevPrices.current.set(position.symbol, ltp)
+              const tick = prev === undefined || prev === ltp ? null : ltp > prev ? 'up' : 'down'
               const value = ltp * position.quantity
               const pnl = (ltp - avg) * position.quantity
               const pnlPct = avg ? ((ltp - avg) / avg) * 100 : 0
@@ -108,7 +140,11 @@ function OpenPositions() {
                   <td className="dim">LONG</td>
                   <td className="num">{position.quantity}</td>
                   <td className="num">{formatPrice(avg)}</td>
-                  <td className="num">{formatPrice(ltp)}</td>
+                  <td className="num">
+                    <span key={ltp} className={tick ? `tick-${tick}` : undefined}>
+                      {formatPrice(ltp)}
+                    </span>
+                  </td>
                   <td className="num">{formatInr(value)}</td>
                   <td className={`num ${pnl < 0 ? 'neg' : 'pos'}`}>{formatSignedInr(pnl)}</td>
                   <td className={`num ${pnlPct < 0 ? 'neg' : 'pos'}`}>{pnlPct.toFixed(2)}%</td>
@@ -123,7 +159,9 @@ function OpenPositions() {
 }
 
 function MarketSnapshotStrip() {
-  const { data: snapshots } = useMarketSnapshots()
+  const { data: snapshots, isFetching } = useMarketSnapshots()
+  const prevPrices = useRef(new Map<string, number>())
+  const now = useNow()
   if (!snapshots?.length) {
     return (
       <div className="card">
@@ -132,22 +170,38 @@ function MarketSnapshotStrip() {
       </div>
     )
   }
+  const age = snapshotAgeSeconds(snapshots, now)
+  const stale = age !== null && age > 90
   return (
     <div className="card">
       <div className="card-title">
-        <span>Market &mdash; real FYERS prices</span>
-        <Badge tone="neutral">Market data only</Badge>
+        <span>
+          <span className={isFetching ? 'live-dot fetching' : 'live-dot'} />
+          Market &mdash; real FYERS prices
+        </span>
+        <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <Badge tone={stale ? 'warn' : 'ok'} testId="market-freshness">
+            {stale ? `STALE · ${formatDuration(age)}` : `LIVE · ${formatDuration(age)}`}
+          </Badge>
+          <Badge tone="neutral">Market data only</Badge>
+        </span>
       </div>
       <div className="stat-grid">
         {snapshots.map((snapshot) => {
           const change = pctChange(snapshot.last_price, snapshot.previous_close)
+          const price = toNumber(snapshot.last_price)
+          const prev = prevPrices.current.get(snapshot.instrument.symbol)
+          prevPrices.current.set(snapshot.instrument.symbol, price)
+          const tick = prev === undefined || prev === price ? null : price > prev ? 'up' : 'down'
           return (
             <Stat
               key={snapshot.instrument.symbol}
               label={`${snapshot.instrument.exchange} ${snapshot.instrument.symbol}`}
               value={
                 <>
-                  {formatPrice(snapshot.last_price)}{' '}
+                  <span key={price} className={tick ? `tick-${tick}` : undefined}>
+                    {formatPrice(snapshot.last_price)}
+                  </span>{' '}
                   <span className={change !== null && change < 0 ? 'neg' : 'pos'}>
                     {change === null ? '' : `${change >= 0 ? '+' : ''}${change.toFixed(2)}%`}
                   </span>
@@ -192,6 +246,59 @@ function AiAnalysis() {
   )
 }
 
+function AiUsage() {
+  const { data } = usePerformance()
+  const usage = data?.ai_usage
+  if (!usage) return null
+  const totalTokens = toNumber(usage.input_tokens) + toNumber(usage.output_tokens)
+  const sources: Array<[string, { calls?: number; input_tokens?: number; output_tokens?: number }]> = [
+    ['Reviews', usage.sources.reviews ?? { calls: 0, input_tokens: 0, output_tokens: 0 }],
+    ['Reconsiderations', usage.sources.reconsiderations ?? { calls: 0, input_tokens: 0, output_tokens: 0 }],
+    ['News analysis', usage.sources.news ?? { calls: 0, input_tokens: 0, output_tokens: 0 }],
+  ]
+  return (
+    <div className="card">
+      <div className="card-title">
+        <span>AI usage &amp; cost</span>
+        <Badge tone="neutral">Bedrock metered</Badge>
+      </div>
+      <div className="stat-grid">
+        <Stat label="AI calls" value={formatInteger(usage.calls)} testId="stat-ai-calls" />
+        <Stat label="Input tokens" value={formatTokens(usage.input_tokens)} testId="stat-ai-input" />
+        <Stat label="Output tokens" value={formatTokens(usage.output_tokens)} testId="stat-ai-output" />
+        <Stat label="Total tokens" value={formatTokens(totalTokens)} testId="stat-ai-total" />
+        <Stat
+          label="Est. cost"
+          value={usage.cost_configured && usage.estimated_cost_usd !== null ? formatUsd(usage.estimated_cost_usd) : 'set rates'}
+          testId="stat-ai-cost"
+        />
+        <Stat
+          label="Last 24h tokens"
+          value={formatTokens(toNumber(usage.last_24h?.input_tokens) + toNumber(usage.last_24h?.output_tokens))}
+        />
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Source</th>
+            <th className="num">Calls</th>
+            <th className="num">Tokens</th>
+          </tr>
+        </thead>
+        <tbody>
+          {sources.map(([name, bucket]) => (
+            <tr key={name}>
+              <td className="dim">{name}</td>
+              <td className="num">{formatInteger(bucket.calls)}</td>
+              <td className="num">{formatTokens(toNumber(bucket.input_tokens) + toNumber(bucket.output_tokens))}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
 export function Dashboard() {
   const { data: decisions } = useDecisions()
   const latest = decisions?.[0]
@@ -199,6 +306,7 @@ export function Dashboard() {
   return (
     <div>
       <PortfolioSummary />
+      <UniverseSwitcher />
       <div className="two-col">
         <div>
           <OpenPositions />
@@ -223,6 +331,7 @@ export function Dashboard() {
         </div>
       </div>
       <AiAnalysis />
+      <AiUsage />
       <LiveNewsPanel />
       <LiveTimeline limit={25} compact />
     </div>

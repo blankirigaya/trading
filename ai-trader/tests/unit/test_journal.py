@@ -1,6 +1,7 @@
 from decimal import Decimal
 
 from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
 
 from ai_trader.domain.decisions import DecisionStatus, PortfolioDecision, ProviderMetadata
 from ai_trader.domain.portfolio import PortfolioState
@@ -10,7 +11,13 @@ from ai_trader.persistence.repositories import SqlDecisionJournal
 
 
 async def test_sql_decision_journal_returns_domain_record(clock) -> None:
-    engine = create_engine("sqlite://")
+    # The journal runs SQLite work in worker threads, and a plain ``sqlite://``
+    # engine gives every thread its own empty in-memory database. One shared
+    # connection keeps the test's table visible to the journal, as a file-backed
+    # database is in production.
+    engine = create_engine(
+        "sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
+    )
     Base.metadata.create_all(engine)
     journal = SqlDecisionJournal(engine)
     record = DecisionRecord(

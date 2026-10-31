@@ -11,7 +11,9 @@ from uuid import uuid4
 
 import websockets
 
+from ai_trader.ai.bedrock import BedrockAIProvider
 from ai_trader.ai.jev import JevUnavailable, TypeSafeJevCritic
+from ai_trader.ai.providers import build_ai_provider
 from ai_trader.ai.remote_model import OpenAICompatibleAIProvider, RemoteAIUnavailable
 from ai_trader.config import Settings
 from ai_trader.domain.common import SystemClock
@@ -57,21 +59,26 @@ CONNECTIVITY_CONTEXT = (
 async def probe_ai(settings: Settings) -> AIProbeResult:
     lines: list[str] = []
     try:
-        provider = OpenAICompatibleAIProvider(
-            settings.ai_base_url,
-            settings.ai_model,
-            settings.ai_api_key,
-            settings.ai_timeout_seconds,
-            settings.ai_max_concurrent_requests,
-        )
+        provider = build_ai_provider(settings)
     except ValueError as exc:
         return AIProbeResult(False, [f"AI CONFIG: {exc}"])
 
-    lines.append(f"server: {provider.server_identifier}")
-    lines.append(f"model: {settings.ai_model}")
+    lines.append(f"provider: {settings.ai_provider}")
+    if isinstance(provider, OpenAICompatibleAIProvider):
+        lines.append(f"server: {provider.server_identifier}")
+        lines.append(f"model: {settings.ai_model}")
+    elif isinstance(provider, BedrockAIProvider):
+        lines.append(f"model: {provider.model_id}")
+        lines.append(f"region: {provider.region or 'from AWS credential chain'}")
+    else:  # pragma: no cover - factory only returns known implementations
+        await provider.aclose()
+        return AIProbeResult(False, [*lines, "error: unsupported provider implementation"])
 
     try:
-        models = await provider.available_models()
+        if isinstance(provider, OpenAICompatibleAIProvider):
+            models = await provider.available_models()
+        else:
+            models = None
     except RemoteAIUnavailable as exc:
         await provider.aclose()
         return AIProbeResult(False, [*lines, "reachable: no", f"error: {exc}"])
@@ -111,6 +118,9 @@ async def probe_ai(settings: Settings) -> AIProbeResult:
     lines.append(
         f"output_tokens: {metadata.output_tokens if metadata.output_tokens is not None else 'not_returned'}"
     )
+    estimated_cost = metadata.provider_metadata.get("estimated_total_usd")
+    if isinstance(estimated_cost, (int, float)):
+        lines.append(f"estimated_cost_usd: {estimated_cost:.6f}")
     lines.append("structured_schema_valid: yes")
     lines.append(f"action: {_primary_action(decision)}")
     lines.append(f"thesis: {decision.decision_summary[:200]}")

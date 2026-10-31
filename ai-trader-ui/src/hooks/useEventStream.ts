@@ -7,7 +7,6 @@ import { useLiveEvents } from '@/store/liveEvents'
 
 /** Event kinds that mean server state changed and cached queries are stale. */
 const INVALIDATING_KINDS = new Set([
-  'market_update',
   'ai_final_decision',
   'ai_initial_decision',
   'paper_order',
@@ -19,6 +18,8 @@ const INVALIDATING_KINDS = new Set([
   'paper_reset',
   'backend_started',
 ])
+// market_update is intentionally excluded: the live queries already poll at
+// 1-2s, and invalidating eight queries per tick event caused a refetch storm.
 
 const INVALIDATED_QUERIES = [
   'systemStatus',

@@ -1,5 +1,6 @@
 from decimal import Decimal
 
+from ai_trader.ai.jev import DisabledJevCritic
 from ai_trader.application.container import Container
 from ai_trader.brokers.paper import PaperBroker
 from ai_trader.brokers.upstox import LiveBrokerNotConfigured, UpstoxBroker
@@ -10,7 +11,9 @@ from ai_trader.domain.orders import OrderRequest, OrderSide, OrderType
 def test_live_shadow_container_uses_only_paper_broker() -> None:
     container = Container(Settings(app_mode="LIVE_SHADOW", jev_enabled=False))
     assert isinstance(container.broker, PaperBroker)
-    assert container.shadow_workflow is None
+    assert container.shadow_workflow is not None
+    assert isinstance(container.shadow_workflow.broker, PaperBroker)
+    assert isinstance(container.shadow_workflow.critic, DisabledJevCritic)
 
 
 async def test_upstox_order_operation_is_forbidden() -> None:

@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 
 import { Badge, Empty } from '@/components/common/Primitives'
+import { PanelErrorBoundary } from '@/components/common/PanelErrorBoundary'
 import { PriceChart, useCandleData, type DecisionMarker } from '@/components/market/PriceChart'
 import { useDecisions } from '@/hooks/useDecisions'
 import { useMarketSnapshots, useMarketStatus } from '@/hooks/useSystemStatus'
@@ -146,7 +147,9 @@ export function Market() {
             <span className="faint">{markers.length} markers</span>
           </div>
           {candles.length ? (
-            <PriceChart candles={candles} markers={markers} testId="market-chart" />
+            <PanelErrorBoundary panel="Price chart">
+              <PriceChart candles={candles} markers={markers} testId="market-chart" />
+            </PanelErrorBoundary>
           ) : (
             <Empty>No candles yet for {activeSymbol}. Awaiting the backend feed.</Empty>
           )}

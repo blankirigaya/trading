@@ -3,7 +3,7 @@ import { OfflineBanner } from '@/components/common/Primitives'
 import { Sidebar } from '@/components/layout/Sidebar'
 import { StatusHeader } from '@/components/status/StatusHeader'
 import { useEventStream } from '@/hooks/useEventStream'
-import { useSystemStatus } from '@/hooks/useSystemStatus'
+import { useMarketStatus, useSystemStatus } from '@/hooks/useSystemStatus'
 import { useLiveEvents } from '@/store/liveEvents'
 
 function ErrorToasts() {
@@ -23,12 +23,13 @@ function ErrorToasts() {
  */
 export function AppShell({ children }: { children: React.ReactNode }) {
   const { data: status, isError } = useSystemStatus()
+  const { data: market, isError: marketFailed } = useMarketStatus()
   useEventStream()
 
   return (
     <div className="app-shell">
       <PaperBanner liveOrderExecution={status?.live_order_execution ?? false} />
-      <StatusHeader status={status} />
+      <StatusHeader status={status} market={market} marketFailed={marketFailed} />
       <Sidebar />
       <main className="app-main">
         {isError ? <OfflineBanner /> : null}

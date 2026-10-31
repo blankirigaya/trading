@@ -370,10 +370,18 @@ async def test_three_outlets_repeating_one_filing_are_one_event(
 async def test_updated_filing_triggers_a_fresh_analysis(
     repository: NewsRepository,
 ) -> None:
+    from ai_trader.news.dedup import content_hash_for
+
+    def revised_with_new_figures() -> NewsItem:
+        text = "The company revised the contract value upward in an updated filing."
+        return make_item("filing-1", content_key="v2").model_copy(
+            update={"excerpt": text, "content": text, "content_hash": content_hash_for(text)}
+        )
+
     ai = ScriptedAI()
     intelligence = build_intelligence(repository, ai)
     original = make_item("filing-1", content_key="v1")
-    revised = make_item("filing-1", content_key="v2")
+    revised = revised_with_new_figures()
     feed = ScriptedFeed("nse-corporate", [[original], [revised]])
     service = build_service(intelligence, feed)
     await service.start()
@@ -402,10 +410,21 @@ async def test_correction_counter_matches_the_events_it_emits(
         emit=lambda category, kind, message, **_: kinds.append(kind),
     )
     counted = 0
+    texts = {
+        "v1": "Initial filing text.",
+        "v2": "Revised filing text with new figures.",
+        "v3": "Further revised filing text with final figures.",
+    }
+    from ai_trader.news.dedup import content_hash_for as _chf
+
+    def keyed(content_key: str) -> NewsItem:
+        text = texts[content_key]
+        return make_item("f1", content_key=content_key).model_copy(
+            update={"excerpt": text, "content": text, "content_hash": _chf(text)}
+        )
+
     for content_key in ("v1", "v2", "v2", "v3"):
-        counted += intelligence.ingest_new_items(
-            (make_item("f1", content_key=content_key),)
-        ).corrections
+        counted += intelligence.ingest_new_items((keyed(content_key),)).corrections
 
     assert counted == kinds.count("news_correction_received")
     # The unchanged revision is stored once and announced once.
@@ -417,16 +436,29 @@ async def test_correction_counter_matches_the_events_it_emits(
 async def test_an_unchanged_revision_costs_no_further_ai_call(
     repository: NewsRepository,
 ) -> None:
+    from ai_trader.news.dedup import content_hash_for as _chf
+
+    revised_text = "Revised filing text with new figures."
+
+    def revised() -> NewsItem:
+        return make_item("f2", content_key="v2").model_copy(
+            update={
+                "excerpt": revised_text,
+                "content": revised_text,
+                "content_hash": _chf(revised_text),
+            }
+        )
+
     ai = ScriptedAI()
     intelligence = build_intelligence(repository, ai)
     original = intelligence.ingest_new_items((make_item("f2", content_key="v1"),))
-    first = intelligence.ingest_new_items((make_item("f2", content_key="v2"),))
+    first = intelligence.ingest_new_items((revised(),))
     assert first.corrections == 1
     await intelligence.enqueue_for_analysis((*original.accepted, *first.accepted))
     await intelligence.pipeline().drain()
     assert len(ai.calls) == 2, "original plus one correction"
 
-    again = intelligence.ingest_new_items((make_item("f2", content_key="v2"),))
+    again = intelligence.ingest_new_items((revised(),))
     assert again.corrections == 0
     assert again.new_items == 0
     assert again.duplicates == 1

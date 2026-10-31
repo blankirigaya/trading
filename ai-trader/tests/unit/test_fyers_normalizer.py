@@ -39,7 +39,7 @@ def test_symbol_parsing_and_internal_identity() -> None:
     assert parsed.exchange == "NSE"
     assert parsed.ticker == "INFY"
     assert parsed.is_equity is True
-    assert parsed.hsm_topic(3045) == TOPIC
+    assert parsed.hsm_topic("10100000003045") == TOPIC
 
     instrument = to_instrument("NSE:INFY-EQ", 3045)
     assert isinstance(instrument, Instrument)
@@ -134,9 +134,8 @@ def test_service_merges_updates_into_latest_state(clock) -> None:
 def test_service_ignores_unsubscribed_topics(clock) -> None:
     service = FyersMarketDataService({TOPIC: INSTRUMENT}, clock)
     other = bytearray((FIXTURES / "fyers_update.bin").read_bytes())
-    # Rewrite the topic name to an untracked symbol of identical length.
-    index = other.index(b"sf|nse_cm|3045")
-    other[index : index + 14] = b"sf|nse_cm|9999"
+    # Rewrite the little-endian topic id to one no snapshot has introduced.
+    other[10:12] = (9999).to_bytes(2, "little")
     assert service.ingest_frame("c1", bytes(other)) == []
     assert service.decoded_count == 0
 

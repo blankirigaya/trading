@@ -30,7 +30,8 @@ from ai_trader.news.analyst import (
     to_analysis,
     to_review_context,
 )
-from ai_trader.news.clustering import NewsClusterIndex
+from ai_trader.news.clustering import NewsClusterIndex, similar_headline
+from ai_trader.news.dedup import normalize_content_for_hash
 from ai_trader.news.documents import download_document, is_trusted_source
 from ai_trader.news.pipeline import NewsPipeline, default_review_gate, poll_sources
 from ai_trader.news.provider import ProviderResult
@@ -93,6 +94,10 @@ class NewsIntelligence:
         self.repository = repository
         self.ai_provider = ai_provider
         self._emit = emit or _noop_emit
+        # Operator kill switch (persisted control, applied at runtime). When
+        # False, headlines still ingest and deduplicate, but no AI analysis
+        # runs and no news-triggered reviews can happen.
+        self.analysis_enabled = True
         self.index = NewsClusterIndex(settings.news_headline_similarity_threshold)
         self.items: dict[str, NewsItem] = {}
         self.analyses: dict[str, NewsAnalysis] = {}
@@ -170,8 +175,9 @@ class NewsIntelligence:
             for item in result.items[: self.settings.news_max_items_per_poll]:
                 summary.received += 1
                 self._emit("MARKET", "news_received", f"{item.source_name}: {item.headline[:140]}")
-                if self._ingest(item, summary) in ("new", "correction"):
-                    pending.append(self.items[item.item_id])
+                classification, stored = self._ingest(item, summary)
+                if classification in ("new", "correction"):
+                    pending.append(stored)
         summary.clusters = len(self.index)
         await self._analyse_pending(pending, summary, analyse=analyse)
         return summary
@@ -194,8 +200,9 @@ class NewsIntelligence:
         for item in items:
             summary.received += 1
             self._emit("MARKET", "news_received", f"{item.source_name}: {item.headline[:140]}")
-            if self._ingest(item, summary) in ("new", "correction"):
-                self._submit_for_analysis(self.items[item.item_id], summary)
+            classification, stored = self._ingest(item, summary)
+            if classification in ("new", "correction"):
+                self._submit_for_analysis(stored, summary)
         summary.clusters = len(self.index)
         return summary
 
@@ -214,12 +221,12 @@ class NewsIntelligence:
         accepted: list[NewsItem] = []
         for item in items:
             outcome.received += 1
-            classification = self._ingest(item, summary, emit_received=True)
+            classification, stored = self._ingest(item, summary, emit_received=True)
             if classification in ("new", "correction"):
                 outcome.new_items += 1
                 if classification == "correction":
                     outcome.corrections += 1
-                accepted.append(self.items[item.item_id])
+                accepted.append(stored)
             else:
                 outcome.duplicates += 1
         outcome.accepted = tuple(accepted)
@@ -236,6 +243,8 @@ class NewsIntelligence:
         pipeline = self.pipeline()
         for item in items:
             stored = self.items.get(item.item_id, item)
+            if not self.analysis_enabled:
+                continue
             if await pipeline.enqueue(stored):
                 queued += 1
         return queued
@@ -244,16 +253,31 @@ class NewsIntelligence:
         if self.pipeline().submit(item):
             summary.enqueued += 1
 
-    def _ingest(self, item: NewsItem, summary: PollSummary, *, emit_received: bool = False) -> str:
-        """Deduplicate and persist one item. Returns new / duplicate / correction.
+    def _ingest(self, item: NewsItem, summary: PollSummary, *, emit_received: bool = False) -> tuple[str, NewsItem]:
+        """Deduplicate and persist one item. Returns (new / duplicate / correction, stored item).
 
         A publisher correction is a *new* item: same source and canonical URL, different
         content. It is stored as a new version so the original evidence survives, and it
-        is eligible for re-analysis because the information genuinely changed.
+        is eligible for re-analysis because the information genuinely changed. The
+        stored copy is returned because a correction is filed under a derived id.
         """
         previous = self.repository.latest_version_for(item.source_id, item.canonical_url)
         correction_of = None
         if previous is not None and previous.content_hash != item.content_hash:
+            if _is_repoll_jitter(previous, item):
+                # Same story re-polled with publisher-side jitter (alternating
+                # headline variants, volatile timestamps): not a correction,
+                # so it must not cost another AI analysis.
+                summary.duplicates += 1
+                if emit_received:
+                    self._emit(
+                        "SYSTEM",
+                        "news_deduplicated",
+                        f"Re-poll of known story without new information "
+                        f"({item.source_name}); not re-analysed",
+                        symbol=item.symbols[0] if item.symbols else None,
+                    )
+                return "duplicate", self.items.get(previous.item_id, previous)
             from ai_trader.news.dedup import content_hash_for
 
             correction_of = previous.item_id
@@ -292,7 +316,7 @@ class NewsIntelligence:
                     f"Duplicate of {previous.headline[:100] if previous else item.headline[:100]}"
                     f" from {item.source_name}; not re-analysed",
                 )
-            return "duplicate"
+            return "duplicate", item
 
         summary.stored += 1
         if emit_received:
@@ -309,7 +333,7 @@ class NewsIntelligence:
                 f"{item.source_name} revised an item (v{item.version}); re-analysing",
                 symbol=item.symbols[0] if item.symbols else None,
             )
-            return "correction"
+            return "correction", item
         if is_duplicate:
             summary.duplicates += 1
             self._emit(
@@ -318,8 +342,8 @@ class NewsIntelligence:
                 f"Duplicate report grouped into {cluster.cluster_id}"
                 f" ({len(cluster.member_item_ids)} sources)",
             )
-            return "duplicate"
-        return "new"
+            return "duplicate", item
+        return "new", item
 
     # --- analysis ----------------------------------------------------------
     async def analyse_item(
@@ -327,6 +351,11 @@ class NewsIntelligence:
     ) -> NewsAnalysis:
         cluster_id = item.cluster_id or ""
         started = started_at or datetime.now(UTC)
+        if not self.analysis_enabled:
+            analysis = failed_analysis(item, cluster_id, "news analysis disabled", started)
+            self.repository.save_analysis(analysis)
+            self.analyses[analysis.analysis_id] = analysis
+            return analysis
         if self.ai_provider is None:
             analysis = failed_analysis(
                 item, cluster_id, "remote AI provider not configured", started
@@ -443,6 +472,28 @@ class NewsIntelligence:
 
 def _noop_emit(category: str, kind: str, message: str, *, symbol: str | None = None) -> None:
     """No-op emitter used by CLI commands that print their own summary."""
+
+
+# Headline similarity required to treat a same-URL re-poll as jitter rather
+# than a correction. Deliberately stricter than the clustering threshold: this
+# gate suppresses AI analysis, so near-identity is required.
+_JITTER_SIMILARITY = 0.8
+
+
+def _is_repoll_jitter(previous: NewsItem, item: NewsItem) -> bool:
+    """True when a re-polled item carries no new information.
+
+    Publisher feeds flip headline variants ("a slice of" vs "slice of") and
+    refresh volatile fragments (timestamps, "updated" stamps) every poll. When
+    the headline is near-identical and the normalized content matches, this is
+    the same story re-polled — not a correction — and must not trigger another
+    AI analysis.
+    """
+    if not similar_headline(previous.headline, item.headline, _JITTER_SIMILARITY):
+        return False
+    prev_text = previous.content or previous.excerpt or ""
+    new_text = item.content or item.excerpt or ""
+    return normalize_content_for_hash(prev_text) == normalize_content_for_hash(new_text)
 
 
 __all__ = ["IngestOutcome", "NewsIntelligence", "PollSummary", "source_by_id"]

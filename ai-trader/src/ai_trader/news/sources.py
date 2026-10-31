@@ -41,6 +41,34 @@ SECONDARY_SOURCES: list[NewsSource] = [
         trust_level=TrustLevel.SECONDARY,
         default_category=NewsCategory.MARKET_NEWS,
     ),
+    # Tier-1 desks: faster on market-moving flow than the dailies above.
+    # Moneycontrol is deliberately absent: its feeds reject automated
+    # clients (HTTP 403), and we do not spoof browser identities to dodge
+    # a publisher's bot protection. Business Today covers the same lane.
+    NewsSource(
+        source_id="cnbc-tv18-markets",
+        name="CNBC-TV18 Markets",
+        homepage="https://www.cnbctv18.com/commonfeeds/v1/cne/rss/market.xml",
+        source_type=SourceType.NEWS_MEDIA,
+        trust_level=TrustLevel.SECONDARY,
+        default_category=NewsCategory.MARKET_NEWS,
+    ),
+    NewsSource(
+        source_id="ndtv-profit-latest",
+        name="NDTV Profit Latest",
+        homepage="https://feeds.feedburner.com/ndtvprofit-latest",
+        source_type=SourceType.NEWS_MEDIA,
+        trust_level=TrustLevel.SECONDARY,
+        default_category=NewsCategory.MARKET_NEWS,
+    ),
+    NewsSource(
+        source_id="business-today-markets",
+        name="Business Today Markets",
+        homepage="https://www.businesstoday.in/rssfeeds/?id=home",
+        source_type=SourceType.NEWS_MEDIA,
+        trust_level=TrustLevel.SECONDARY,
+        default_category=NewsCategory.MARKET_NEWS,
+    ),
 ]
 
 AGGREGATOR_SOURCES: list[NewsSource] = [
@@ -59,8 +87,24 @@ def all_sources() -> list[NewsSource]:
     return [*official_sources(), *SECONDARY_SOURCES, *AGGREGATOR_SOURCES]
 
 
-def enabled_sources() -> list[NewsSource]:
-    return [source for source in all_sources() if source.enabled]
+#: Tier-1 desks, separately switchable at runtime so a noisy or expensive
+#: feed can be killed without touching the rest of the news pipeline.
+TIER1_SOURCE_IDS: frozenset[str] = frozenset(
+    {"cnbc-tv18-markets", "ndtv-profit-latest", "business-today-markets"}
+)
+
+
+def enabled_sources(*, include_tier1: bool = True) -> list[NewsSource]:
+    """Sources eligible for continuous ingestion.
+
+    ``include_tier1=False`` drops the Tier-1 desks (persisted operator
+    override); official filings and secondary dailies are unaffected.
+    """
+    return [
+        source
+        for source in all_sources()
+        if source.enabled and (include_tier1 or source.source_id not in TIER1_SOURCE_IDS)
+    ]
 
 
 def build_provider(source: NewsSource, timeout: int = 25) -> NewsProvider:

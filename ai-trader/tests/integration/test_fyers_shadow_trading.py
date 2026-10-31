@@ -179,7 +179,7 @@ def _feed(clock):
 def _workflow(clock, ai, critic, journal):
     broker = PaperBroker(Decimal("100000"), clock, {"INFY": PRICE_UNIT})
     return ShadowReviewWorkflow(
-        PortfolioManagerAgent(ai, "v2"),
+        PortfolioManagerAgent(ai, "v4"),
         critic,
         broker,
         SafetyEnvelope(Settings(trading_enabled=True), KillSwitch(), clock),
@@ -372,6 +372,7 @@ def test_initial_capital_is_configurable(tmp_path, clock) -> None:
         Settings(
             app_mode="LIVE_SHADOW",
             shadow_initial_capital_inr=Decimal("250000"),
+            ai_review_shards=1,
             database_url=f"sqlite:///{tmp_path / 's.db'}",
             ai_base_url="http://ai:8080/v1",
             ai_model="m",
@@ -380,5 +381,8 @@ def test_initial_capital_is_configurable(tmp_path, clock) -> None:
         feed,
         clock=clock,
     )
-    assert session.broker.cash == Decimal("250000")
-    assert session.broker.set_price("INFY", Decimal("1500.25")) is None
+    assert len(session.shards) == 1
+    assert session.shards[0].broker.cash == Decimal("250000")
+    assert session.shards[0].broker.set_price("INFY", Decimal("1500.25")) is None
+
+

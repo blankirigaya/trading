@@ -53,6 +53,11 @@ class TradeProposal(BaseModel):
     action: PortfolioAction
     side: OrderSide | None = None
     capital_allocation_inr: Decimal | None = Field(default=None, gt=0)
+    # Whole NSE shares to trade. This is binding: execution trades exactly this
+    # many shares at the live price, with capital_allocation_inr acting as the
+    # budget cap. Stating shares explicitly keeps a model that cannot do
+    # division from blocking every trade; consistency is enforced, not recomputed.
+    quantity_shares: int | None = Field(default=None, gt=0)
     desired_entry_price: Decimal | None = Field(default=None, gt=0)
     order_type: OrderType = OrderType.MARKET
     invalidation_price: Decimal | None = Field(default=None, gt=0)
@@ -60,8 +65,10 @@ class TradeProposal(BaseModel):
     expected_holding_minutes: int | None = Field(default=None, gt=0)
     confidence: float = Field(ge=0, le=1)
     thesis: str = Field(min_length=1)
-    evidence: list[str]
-    conditions_that_change_thesis: list[str]
+    # Informational only: never gate execution on them, so they default
+    # instead of failing the whole decision when the model omits them.
+    evidence: list[str] = Field(default_factory=list)
+    conditions_that_change_thesis: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def require_order_fields_for_trade(self) -> "TradeProposal":
@@ -77,8 +84,10 @@ class DesiredPortfolioAllocation(BaseModel):
     model_config = ConfigDict(frozen=True)
     symbol: str
     allocation_percent: float = Field(ge=0, le=100)
-    thesis: str
-    confidence: float = Field(ge=0, le=1)
+    # Informational only: never drives execution, so missing values default
+    # instead of failing the whole decision.
+    thesis: str = ""
+    confidence: float = Field(default=0.0, ge=0, le=1)
 
 
 class PortfolioDecision(BaseModel):

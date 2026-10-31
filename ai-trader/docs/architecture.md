@@ -20,12 +20,12 @@ flowchart TB
     DJ --> PG[(PostgreSQL)]
   end
 
-  subgraph MB["Machine B - AI Node"]
-    MSRV[OpenAI-compatible server]
+  subgraph MB["Configured inference service"]
+    MSRV[OpenAI-compatible server or Amazon Bedrock]
   end
 
-  MSRV -.->|HTTPS structured decision| AI
-  AI -.->|HTTPS| MSRV
+  MSRV -.->|structured decision| AI
+  AI -.->|inference request| MSRV
   JV -.->|HTTPS| JE[TypeSafe AI Jev]
   WF -.-> FY[(FYERS market data)]
   PBO -.x FY
@@ -39,6 +39,7 @@ The crossed edge is the point: FYERS provides information only. Nothing flows ba
 | --- | --- |
 | `domain` | `Instrument`, `MarketTick`, `Candle`, `MarketState`, decisions. No provider types. |
 | `application` | The `MarketState` contract and `PaperBroker`. No FYERS or Upstox types. |
+| `ai/providers.py` | Selects the configured `AIProvider`; workflows never instantiate a backend. |
 | `integrations/fyers` | FYERS wire format and protocol constants. Contained here. |
 
 FYERS objects never leave `integrations/fyers`. The Upstox integration is retained but is not part

@@ -135,6 +135,7 @@ async def _shadow(settings: Settings, args: argparse.Namespace) -> int:
     session = await build_session_from_settings(settings, symbols)
     print("FYERS shadow session starting (provider=fyers, execution=PaperBroker)")
     print(f"symbols: {', '.join(session.feed.topic_to_symbol.values()) or 'n/a'}")
+    print(f"shards: {len(session.shards)}")
     print(f"review cadence: {session.interval_seconds}s")
     await session.start_ingestion()
     try:
@@ -147,8 +148,10 @@ async def _shadow(settings: Settings, args: argparse.Namespace) -> int:
         await session.aclose()
     print("")
     print("PORTFOLIO")
-    for key, value in summarise_portfolio(session.broker).items():
-        print(f"  {key}: {value}")
+    for shard in session.shards:
+        print(f"  shard {shard.index} ({len(shard.symbols)} symbols):")
+        for key, value in summarise_portfolio(shard.broker).items():
+            print(f"    {key}: {value}")
     return 0
 
 

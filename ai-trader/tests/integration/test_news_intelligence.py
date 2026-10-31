@@ -487,6 +487,85 @@ async def test_duplicate_news_does_not_cause_duplicate_review(
     assert pipeline.stats.enqueued == 1
 
 
+async def test_repoll_jitter_does_not_trigger_reanalysis(
+    repository: NewsRepository,
+) -> None:
+    """Same URL re-polled with headline-variant + timestamp-only changes.
+
+    Regression test for a live incident: a feed alternating two headline
+    variants produced 25 "correction" versions in 50 minutes, each costing a
+    full Bedrock analysis of the same story.
+    """
+    from ai_trader.news.dedup import content_hash_for, headline_hash_for
+
+    def jittered(
+        item_id: str, headline: str, excerpt: str, canonical: str = "https://example.com/jitter"
+    ):
+        return _item("seed").model_copy(
+            update={
+                "item_id": item_id,
+                "headline": headline,
+                "canonical_url": canonical,
+                "url": canonical,
+                "excerpt": excerpt,
+                "content": excerpt,
+                "content_hash": content_hash_for(excerpt),
+                "headline_hash": headline_hash_for(headline),
+            }
+        )
+
+    intelligence = _intelligence(repository, ScriptedAI())
+    base = jittered("j1", "Infosys wins big order", "Deal details at 10:15 IST.")
+    intelligence.ingest_items([base])
+    # Same story, publisher-side jitter: headline variant + new timestamp only.
+    twin = jittered("j2", "Infosys wins a big order", "Deal details at 10:47 IST.")
+    intelligence.ingest_items([twin])
+
+    await intelligence.pipeline().drain()
+
+    assert twin.headline != base.headline
+    assert twin.content_hash != base.content_hash
+    stored = repository.latest_version_for("src-x", "https://example.com/jitter")
+    assert stored is not None
+    assert stored.version == 1
+    assert intelligence.pipeline().stats.analysed == 1
+
+
+async def test_genuine_correction_still_triggers_reanalysis(
+    repository: NewsRepository,
+) -> None:
+    """Materially changed content at the same URL remains eligible for analysis."""
+    from ai_trader.news.dedup import content_hash_for, headline_hash_for
+
+    def versioned(item_id: str, headline: str, excerpt: str):
+        canonical = "https://example.com/correction"
+        return _item("seed").model_copy(
+            update={
+                "item_id": item_id,
+                "headline": headline,
+                "canonical_url": canonical,
+                "url": canonical,
+                "excerpt": excerpt,
+                "content": excerpt,
+                "content_hash": content_hash_for(excerpt),
+                "headline_hash": headline_hash_for(headline),
+            }
+        )
+
+    intelligence = _intelligence(repository, ScriptedAI())
+    intelligence.ingest_items([versioned("c1", "Infosys wins big order", "Deal valued at 100 crore.")])
+    intelligence.ingest_items(
+        [versioned("c2", "Infosys wins big order", "Deal cancelled over regulatory concerns.")]
+    )
+
+    await intelligence.pipeline().drain()
+
+    stored = repository.latest_version_for("src-x", "https://example.com/correction")
+    assert stored is not None
+    assert stored.version == 2
+    assert intelligence.pipeline().stats.analysed == 2
+
+
 def test_analyses_needing_review_excludes_reviewed_and_incomplete(
     repository: NewsRepository,
 ) -> None:

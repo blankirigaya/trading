@@ -2,62 +2,18 @@ import { useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 
 import { api } from '@/api/client'
+import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 import { Badge, Empty, StateBadge } from '@/components/common/Primitives'
 import { useLiveEvents } from '@/store/liveEvents'
 import { useMarketStatus, useSystemStatus } from '@/hooks/useSystemStatus'
 import { formatDateTime, formatInr } from '@/utils/format'
-
-/** Confirmation gate for destructive controls. Required for kill switch and reset. */
-function ConfirmDialog({
-  title,
-  body,
-  confirmLabel,
-  onConfirm,
-  onCancel,
-  testId,
-}: {
-  title: string
-  body: string
-  confirmLabel: string
-  onConfirm: () => void
-  onCancel: () => void
-  testId: string
-}) {
-  return (
-    <>
-      <div className="drawer-backdrop" onClick={onCancel} />
-      <div
-        className="drawer"
-        style={{ left: '50%', right: 'auto', transform: 'translateX(-50%)', width: 'min(520px, 92vw)', zIndex: 41 }}
-        role="dialog"
-        aria-modal="true"
-        data-testid={testId}
-      >
-        <div className="drawer-head">
-          <h2>{title}</h2>
-        </div>
-        <div className="card">
-          <div className="stage-body">{body}</div>
-        </div>
-        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-          <button type="button" className="btn" onClick={onCancel}>
-            Cancel
-          </button>
-          <button type="button" className="btn danger" onClick={onConfirm} data-testid="confirm-button">
-            {confirmLabel}
-          </button>
-        </div>
-      </div>
-    </>
-  )
-}
 
 export function System() {
   const queryClient = useQueryClient()
   const { data: status } = useSystemStatus()
   const { data: market } = useMarketStatus()
   const streamState = useLiveEvents((state) => state.streamState)
-  const [pending, setPending] = useState<'kill-switch' | 'reset' | null>(null)
+  const [pending, setPending] = useState<'kill-switch' | 'reset' | 'capital-cap' | 'position-cap' | 'tier1-news' | 'news-analysis' | 'sonnet-escalation' | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
 
   const refresh = () => {
@@ -81,6 +37,16 @@ export function System() {
   if (!status) return <Empty>Backend offline &mdash; no system status available</Empty>
 
   const killSwitchOn = status.kill_switch_state
+  const capitalCapDisabled = status.capital_cap_disabled === true
+  const positionCapDisabled = status.position_count_cap_disabled === true
+  const aiCap = formatInr(status.max_ai_capital_inr ?? '50000')
+  const perPositionCap = formatInr(status.max_single_position_inr ?? '25000')
+  const maxPositions = status.max_open_positions ?? 5
+  const tier1On = status.tier1_news_enabled !== false
+  const analysisOn = status.news_analysis_enabled !== false
+  const escalationOn = status.sonnet_escalation_enabled !== false
+  const escalationsToday = status.sonnet_escalations_today ?? 0
+  const escalationCap = status.ai_max_sonnet_escalations_per_day ?? 20
 
   return (
     <div>
@@ -100,10 +66,40 @@ export function System() {
           <dd>{String(status.market_connected)}</dd>
           <dt>Feed mode</dt>
           <dd>{market?.feed_mode ?? 'n/a'}</dd>
+          <dt>Universe mode</dt>
+          <dd data-testid="system-universe-mode">
+            {(status.universe_mode ?? 'cheap').toUpperCase()} &middot; {status.universe_selected?.length ?? status.shadow_symbols.length} symbols
+          </dd>
           <dt>Watched symbols</dt>
           <dd>{status.shadow_symbols.join(', ')}</dd>
           <dt>Starting capital</dt>
           <dd>{formatInr(status.shadow_initial_capital_inr)}</dd>
+          <dt>Capital cap</dt>
+          <dd data-testid="system-capital-cap">
+            {capitalCapDisabled
+              ? 'DISABLED · AI sizes within available cash'
+              : `${aiCap} AI capital · ${perPositionCap} per position`}
+          </dd>
+          <dt>Position-count cap</dt>
+          <dd data-testid="system-position-cap">
+            {positionCapDisabled
+              ? 'DISABLED · AI decides how many positions to hold'
+              : `At most ${maxPositions} open positions`}
+          </dd>
+          <dt>Tier-1 news desks</dt>
+          <dd data-testid="system-tier1-news">
+            {tier1On ? 'ON · CNBC-TV18, NDTV Profit, Business Today' : 'OFF · filings and dailies only'}
+          </dd>
+          <dt>News AI analysis</dt>
+          <dd data-testid="system-news-analysis">
+            {analysisOn ? 'ON · headlines analysed as they arrive' : 'OFF · headlines ingest only, no AI calls'}
+          </dd>
+          <dt>Sonnet escalation</dt>
+          <dd data-testid="system-sonnet-escalation">
+            {escalationOn
+              ? `ON · news reviews on Sonnet (${escalationsToday}/${escalationCap} today)`
+              : 'OFF · news reviews on the cadence model'}
+          </dd>
           <dt>Review interval</dt>
           <dd>{status.portfolio_review_interval_seconds}s</dd>
           <dt>Session running</dt>
@@ -193,6 +189,51 @@ export function System() {
           </button>
           <button
             type="button"
+            className="btn"
+            disabled={busy !== null}
+            onClick={() => setPending('capital-cap')}
+            data-testid="control-capital-cap"
+          >
+            {capitalCapDisabled ? 'Restore capital cap' : 'Disable capital cap'}
+          </button>
+          <button
+            type="button"
+            className="btn"
+            disabled={busy !== null}
+            onClick={() => setPending('position-cap')}
+            data-testid="control-position-cap"
+          >
+            {positionCapDisabled ? 'Restore position cap' : 'Disable position cap'}
+          </button>
+          <button
+            type="button"
+            className="btn"
+            disabled={busy !== null}
+            onClick={() => setPending('tier1-news')}
+            data-testid="control-tier1-news"
+          >
+            {tier1On ? 'Turn off Tier-1 news' : 'Turn on Tier-1 news'}
+          </button>
+          <button
+            type="button"
+            className="btn"
+            disabled={busy !== null}
+            onClick={() => setPending('news-analysis')}
+            data-testid="control-news-analysis"
+          >
+            {analysisOn ? 'Turn off news analysis' : 'Turn on news analysis'}
+          </button>
+          <button
+            type="button"
+            className="btn"
+            disabled={busy !== null}
+            onClick={() => setPending('sonnet-escalation')}
+            data-testid="control-sonnet-escalation"
+          >
+            {escalationOn ? 'Turn off Sonnet escalation' : 'Turn on Sonnet escalation'}
+          </button>
+          <button
+            type="button"
             className="btn danger"
             disabled={busy !== null}
             onClick={() => setPending('kill-switch')}
@@ -211,6 +252,81 @@ export function System() {
           </button>
         </div>
       </div>
+
+      {pending === 'capital-cap' ? (
+        <ConfirmDialog
+          testId="capital-cap-dialog"
+          title={capitalCapDisabled ? 'Restore the capital cap?' : 'Disable the capital cap?'}
+          body={
+            capitalCapDisabled
+              ? `New buys will again be limited to ${aiCap} AI capital, ${perPositionCap} per position, and the gross-exposure cap. Open positions stay untouched and remain closable.`
+              : `New buys will no longer be limited by the fixed AI capital, single-position, or gross-exposure caps. The AI sizes each position with its own judgement inside available paper cash; exits still apply${positionCapDisabled ? '' : ` and the ${maxPositions}-position limit still applies`}. Paper trading only.`
+          }
+          confirmLabel={capitalCapDisabled ? 'Restore cap' : 'Disable cap'}
+          onCancel={() => setPending(null)}
+          onConfirm={() => run('capital-cap', () => api.setCapitalCap(!capitalCapDisabled))}
+        />
+      ) : null}
+
+      {pending === 'position-cap' ? (
+        <ConfirmDialog
+          testId="position-cap-dialog"
+          title={positionCapDisabled ? 'Restore the position cap?' : 'Disable the position cap?'}
+          body={
+            positionCapDisabled
+              ? `New symbols will again be limited to at most ${maxPositions} open positions. Open positions stay untouched and remain closable.`
+              : `The AI will no longer be limited to ${maxPositions} open positions. It decides how many symbols to hold with its own judgement inside available paper cash; exits and the money caps still apply unless separately disabled. Paper trading only.`
+          }
+          confirmLabel={positionCapDisabled ? 'Restore cap' : 'Disable cap'}
+          onCancel={() => setPending(null)}
+          onConfirm={() => run('position-cap', () => api.setPositionCap(!positionCapDisabled))}
+        />
+      ) : null}
+
+      {pending === 'tier1-news' ? (
+        <ConfirmDialog
+          testId="tier1-news-dialog"
+          title={tier1On ? 'Turn off Tier-1 news desks?' : 'Turn on Tier-1 news desks?'}
+          body={
+            tier1On
+              ? 'CNBC-TV18, NDTV Profit and Business Today stop polling immediately. Official filings and secondary dailies keep flowing. Takes effect at once, no restart.'
+              : 'CNBC-TV18, NDTV Profit and Business Today resume polling on the normal 10s financial cadence. Takes effect at once, no restart.'
+          }
+          confirmLabel={tier1On ? 'Turn off' : 'Turn on'}
+          onCancel={() => setPending(null)}
+          onConfirm={() => run('tier1-news', () => api.setTier1News(!tier1On))}
+        />
+      ) : null}
+
+      {pending === 'news-analysis' ? (
+        <ConfirmDialog
+          testId="news-analysis-dialog"
+          title={analysisOn ? 'Turn off news AI analysis?' : 'Turn on news AI analysis?'}
+          body={
+            analysisOn
+              ? 'Headlines keep ingesting and deduplicating, but no Sonnet analysis runs — so nothing new can trigger a news review either. Cadence reviews are unaffected. Takes effect at once.'
+              : 'Headlines are analysed by Sonnet as they arrive again, and significant items can trigger news reviews. Takes effect at once.'
+          }
+          confirmLabel={analysisOn ? 'Turn off' : 'Turn on'}
+          onCancel={() => setPending(null)}
+          onConfirm={() => run('news-analysis', () => api.setNewsAnalysis(!analysisOn))}
+        />
+      ) : null}
+
+      {pending === 'sonnet-escalation' ? (
+        <ConfirmDialog
+          testId="sonnet-escalation-dialog"
+          title={escalationOn ? 'Turn off Sonnet escalation?' : 'Turn on Sonnet escalation?'}
+          body={
+            escalationOn
+              ? `News-triggered reviews go back to the cheap cadence model. The ${escalationsToday} Sonnet review(s) already used today stay journalled.`
+              : `News-triggered reviews run on Sonnet instead of the cadence model, bounded at ${escalationCap} per day. Routine 60s reviews stay on the cheap model.`
+          }
+          confirmLabel={escalationOn ? 'Turn off' : 'Turn on'}
+          onCancel={() => setPending(null)}
+          onConfirm={() => run('sonnet-escalation', () => api.setSonnetEscalation(!escalationOn))}
+        />
+      ) : null}
 
       {pending === 'kill-switch' ? (
         <ConfirmDialog

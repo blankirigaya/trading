@@ -20,6 +20,7 @@ Concurrency invariants:
 import asyncio
 import contextlib
 import logging
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -70,6 +71,9 @@ class RealtimeNewsService:
     _tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict)
     _running: bool = False
     _outcomes: dict[str, int] = field(default_factory=dict)
+    # Source ids killed at runtime via set_source_enabled. Honoured by start()
+    # so a toggle survives a service restart without rebuilding the session.
+    _disabled: set[str] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         self.feeds = {source.source_id: self._build_feed(source) for source in self.sources}
@@ -102,19 +106,21 @@ class RealtimeNewsService:
         return self._running
 
     async def start(self) -> None:
-        """Start one polling task per source. Idempotent."""
+        """Start one polling task per enabled source. Idempotent."""
         if self._running:
             return
         self._running = True
         for source_id, feed in self.feeds.items():
+            if source_id in self._disabled:
+                continue
             self._tasks[source_id] = asyncio.create_task(
                 self._supervise(feed), name=f"news-feed:{source_id}"
             )
-        logger.info("news ingestion started for %d sources", len(self.feeds))
+        logger.info("news ingestion started for %d sources", len(self._tasks))
         self._emit(
             "SYSTEM",
             "news_ingestion_started",
-            f"Continuous news ingestion started for {len(self.feeds)} sources",
+            f"Continuous news ingestion started for {len(self._tasks)} sources",
         )
 
     async def stop(self) -> None:
@@ -130,6 +136,47 @@ class RealtimeNewsService:
         self._tasks.clear()
         logger.info("news ingestion stopped")
         self._emit("SYSTEM", "news_ingestion_stopped", "Continuous news ingestion stopped")
+
+    def disable_sources(self, source_ids: Collection[str]) -> None:
+        """Pre-mark sources as killed (e.g. from persisted controls at build).
+
+        They stay registered so a later :meth:`set_source_enabled` can revive
+        them, but :meth:`start` will not launch them.
+        """
+        self._disabled.update(source_ids)
+
+    async def set_source_enabled(self, source_id: str, enabled: bool) -> bool:
+        """Stop or (re)start one feed without touching the others.
+
+        Returns True when the set of running feeds changed. Feeds stay
+        registered, so re-enabling resumes the same feed object. No-op when
+        the service itself is stopped: the next start() honours the flag
+        via the sources list instead.
+        """
+        if source_id not in self.feeds:
+            return False
+        if enabled:
+            self._disabled.discard(source_id)
+        else:
+            self._disabled.add(source_id)
+        task = self._tasks.pop(source_id, None)
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+        if enabled and self._running:
+            feed = self.feeds[source_id]
+            self._tasks[source_id] = asyncio.create_task(
+                self._supervise(feed), name=f"news-feed:{source_id}"
+            )
+        changed = (task is not None) != enabled
+        if changed:
+            self._emit(
+                "SYSTEM",
+                "news_source_toggled",
+                f"News source {source_id} {'enabled' if enabled else 'disabled'}",
+            )
+        return changed
 
     async def _supervise(self, feed: NewsFeed) -> None:
         """Run a feed forever, restarting it if it dies unexpectedly."""

@@ -41,6 +41,35 @@ AI_MODEL=<server-model-id>
 AI_API_KEY=
 ```
 
+## Amazon Bedrock Provider
+
+Set `AI_PROVIDER=bedrock` to use Amazon Bedrock Runtime instead of Machine B. Bedrock is an
+alternate implementation of the existing `AIProvider` interface: prompts, schemas, reviews,
+risk checks, paper execution, and the journal are unchanged.
+
+```env
+AI_PROVIDER=bedrock
+BEDROCK_REGION=ap-south-1
+BEDROCK_MODEL_ID=apac.amazon.nova-pro-v1:0
+BEDROCK_MAX_INPUT_TOKENS=32000
+BEDROCK_MAX_TOKENS=1024
+BEDROCK_TEMPERATURE=0
+BEDROCK_TIMEOUT_SECONDS=30
+BEDROCK_MAX_RETRIES=2
+```
+
+Use the standard AWS credential chain, preferably an IAM role or temporary session
+credentials. Do not put AWS access keys in Git. Bedrock model access, marketplace
+prerequisites, payment method, and any use-case approval must be completed in AWS before
+live inference can succeed; without them, `ai test` reports an actionable failure and no
+trade is made.
+
+Validate Bedrock without running the trading loop:
+
+```bash
+uv run python -m ai_trader ai test
+```
+
 ## FYERS Configuration
 
 ```env

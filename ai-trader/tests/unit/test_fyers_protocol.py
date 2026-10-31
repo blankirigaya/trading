@@ -155,6 +155,17 @@ def test_price_fields_are_unscaled_and_volumes_are_not() -> None:
     assert fields["exch_feed_time"] == 1_757_000_000
 
 
+def test_update_fixture_carries_topic_id_without_name() -> None:
+    _, snapshot_feeds = parse_datafeed((FIXTURES / "fyers_snapshot.bin").read_bytes())
+    _, update_feeds = parse_datafeed((FIXTURES / "fyers_update.bin").read_bytes())
+    snapshot, update = snapshot_feeds[0], update_feeds[0]
+    assert snapshot.topic_name == "sf|nse_cm|3045"
+    # Live update frames omit the topic name; the numeric id links them to the
+    # snapshot that introduced it.
+    assert update.topic_name is None
+    assert update.topic_id == snapshot.topic_id
+
+
 def test_update_fixture_decodes_partial_field_set() -> None:
     message_num, feeds = parse_datafeed((FIXTURES / "fyers_update.bin").read_bytes())
     assert message_num == 2
@@ -162,6 +173,17 @@ def test_update_fixture_decodes_partial_field_set() -> None:
     fields = feeds[0].as_mapping()
     assert fields["ltp"] == pytest.approx(1501.80)
     assert "open_price" not in fields
+
+
+def test_multi_snapshot_frame_resolves_every_scrip() -> None:
+    message_num, feeds = parse_datafeed((FIXTURES / "fyers_multi_snapshot.bin").read_bytes())
+    assert message_num == 4
+    assert len(feeds) == 2
+    assert [feed.topic_name for feed in feeds] == ["sf|nse_cm|3045", "sf|nse_cm|1594"]
+    assert all(feed.data_type == DataType.SNAPSHOT for feed in feeds)
+    assert {feed.topic_id for feed in feeds} == {1, 2}
+    assert feeds[0].as_mapping()["ltp"] == pytest.approx(1500.25)
+    assert feeds[1].as_mapping()["ltp"] == pytest.approx(1500.25)
 
 
 def test_lite_fixture_uses_lite_schema() -> None:

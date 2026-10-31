@@ -3,10 +3,12 @@
 These tests verify journalling and translation. They are not the real acceptance run.
 """
 
+from datetime import timedelta
 from decimal import Decimal
 
 import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
 
 from ai_trader.ai.base import AIProvider
 from ai_trader.ai.jev import JevCritic
@@ -122,7 +124,7 @@ class ScriptedCritic(JevCritic):
 def _workflow(clock, ai: AIProvider, critic: JevCritic, journal):
     broker = PaperBroker(Decimal("100000"), clock, {"INFY": Decimal("1500.25")})
     return ShadowReviewWorkflow(
-        PortfolioManagerAgent(ai, "v2"),
+        PortfolioManagerAgent(ai, "v4"),
         critic,
         broker,
         SafetyEnvelope(Settings(trading_enabled=True), KillSwitch(), clock),
@@ -134,7 +136,12 @@ def _workflow(clock, ai: AIProvider, critic: JevCritic, journal):
 
 @pytest.fixture
 def sql_journal():
-    engine = create_engine("sqlite://")
+    # The journal runs SQLite work in worker threads; a plain in-memory engine
+    # gives each thread its own empty database. Share one connection so the
+    # schema is visible, as a file-backed database is in production.
+    engine = create_engine(
+        "sqlite://", poolclass=StaticPool, connect_args={"check_same_thread": False}
+    )
     Base.metadata.create_all(engine)
     yield SqlDecisionJournal(engine)
     engine.dispose()
@@ -259,6 +266,28 @@ async def test_jev_failure_journals_failure_without_trade(clock, sql_journal) ->
     assert stored is not None and stored.failure_reason
 
 
+async def test_jev_transport_failure_records_root_cause(clock, sql_journal) -> None:
+    import httpx
+
+    from ai_trader.ai.jev import JevUnavailable
+
+    class ChainedCritic(JevCritic):
+        async def assess(self, proposal, news=None):
+            try:
+                raise httpx.ConnectError("simulated blip")
+            except httpx.ConnectError as exc:
+                raise JevUnavailable("Jev critique request failed") from exc
+
+    record = await _workflow(clock, ScriptedAI([_decision()]), ChainedCritic(), sql_journal).run(
+        _state(clock)
+    )
+    assert record.status is DecisionStatus.FAILED
+    assert record.orders_generated == []
+    assert record.failure_reason is not None
+    assert record.failure_reason.startswith("jev: Jev critique request failed")
+    assert "ConnectError" in record.failure_reason
+
+
 async def test_ai_failure_journals_failure_without_trade(clock, sql_journal) -> None:
     from ai_trader.ai.remote_model import RemoteAIUnavailable
 
@@ -374,3 +403,29 @@ async def test_journal_never_stores_credentials(clock, sql_journal) -> None:
     serialized = record.model_dump_json()
     for secret in ("hunter2", "Authorization", "Bearer", "api_key"):
         assert secret not in serialized
+
+
+async def test_journal_timestamps_survive_sqlite_without_timezone(clock, sql_journal) -> None:
+    """SQLite drops tzinfo on round-trip; reads must come back as UTC, not naive."""
+    ai = ScriptedAI([_decision()])
+    critic = ScriptedCritic(
+        CriticAssessment(
+            score=0.8,
+            agrees=True,
+            disagreement_signals=[],
+            critique="ok",
+            bounded_decisions=["APPROVE"],
+        )
+    )
+    record = await _workflow(clock, ai, critic, sql_journal).run(_state(clock))
+    loaded = await sql_journal.get(record.decision_id)
+    assert loaded is not None
+    assert loaded.timestamp.tzinfo is not None
+    assert loaded.timestamp.utcoffset() == timedelta(0)
+    # Serialized form must carry the offset ("Z" or "+00:00") so browsers convert
+    # to IST correctly instead of treating it as local time.
+    serialized_ts = loaded.model_dump(mode="json")["timestamp"]
+    assert isinstance(serialized_ts, str)
+    assert serialized_ts.endswith(("Z", "+00:00"))
+
+

@@ -233,7 +233,7 @@ const statusPayload = {
   last_ai_error: null,
 }
 
-function stubBackend(overrides: Record<string, unknown> = {}) {
+function stubBackend(overrides: Record<string, unknown> = {}, performanceBody: unknown = {}, botsBody: unknown = []) {
   const calls: string[] = []
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input)
@@ -253,11 +253,66 @@ function stubBackend(overrides: Record<string, unknown> = {}) {
     if (url.includes('/news/latency')) return json(latencyResponse)
     if (url.includes('/news')) return json(newsRows)
     if (url.includes('/decisions')) return json([])
+    if (url.includes('/trades/history'))
+      return json({
+        closed_trades: [
+          {
+            closed_trade_id: 'CLOSE-FILL-PAPER-000002',
+            shard: 0,
+            symbol: 'INFY',
+            quantity: 10,
+            entry_price: '100.0000',
+            exit_price: '112.0000',
+            realized_pnl: '118.8800',
+            charges: '1.1200',
+            gross_pnl: '120.0000',
+            opened_at: null,
+            closed_at: '2026-10-28T05:30:00+00:00',
+            entry_decision_id: 'd1',
+            exit_decision_id: 'd2',
+          },
+        ],
+        total_realized_pnl: '118.8800',
+        total_charges: '1.1200',
+        gross_realized_pnl: '120.0000',
+        wins: 1,
+        losses: 0,
+      })
     if (url.includes('/trades')) return json([])
-    if (url.includes('/performance')) return json({})
+    if (url.includes('/performance')) return json(performanceBody)
+    if (url.endsWith('/bots')) return json(botsBody)
     if (url.includes('/positions')) return json([])
     if (url.includes('/control/kill-switch'))
       return json({ kill_switch_state: true, live_order_execution: false })
+    if (url.includes('/control/universe')) {
+      const mode = new URL(url, 'http://127.0.0.1').searchParams.get('mode') ?? 'cheap'
+      return json({ universe_mode: mode, applies: 'next_review' })
+    }
+    if (url.includes('/control/capital-cap')) {
+      const disabled =
+        new URL(url, 'http://127.0.0.1').searchParams.get('disabled') === 'true'
+      return json({ capital_cap_disabled: disabled, live_order_execution: false })
+    }
+    if (url.includes('/control/position-cap')) {
+      const disabled =
+        new URL(url, 'http://127.0.0.1').searchParams.get('disabled') === 'true'
+      return json({ position_count_cap_disabled: disabled, live_order_execution: false })
+    }
+    if (url.includes('/control/tier1-news')) {
+      const enabled =
+        new URL(url, 'http://127.0.0.1').searchParams.get('enabled') !== 'false'
+      return json({ tier1_news_enabled: enabled, live_order_execution: false })
+    }
+    if (url.includes('/control/news-analysis')) {
+      const enabled =
+        new URL(url, 'http://127.0.0.1').searchParams.get('enabled') !== 'false'
+      return json({ news_analysis_enabled: enabled, live_order_execution: false })
+    }
+    if (url.includes('/control/sonnet-escalation')) {
+      const enabled =
+        new URL(url, 'http://127.0.0.1').searchParams.get('enabled') !== 'false'
+      return json({ sonnet_escalation_enabled: enabled, live_order_execution: false })
+    }
     if (url.includes('/paper/reset')) return json({ status: 'reset' })
     return json({})
   })
@@ -300,6 +355,26 @@ describe('App shell', () => {
     expect(screen.getByText('AI TRADER')).toBeInTheDocument()
     await waitFor(() =>
       expect(screen.getByTestId('live-order-execution')).toHaveTextContent('FALSE'),
+    )
+  })
+
+  it('switches the AI universe from the dashboard after confirmation', async () => {
+    const { fetchMock } = stubBackend({ universe_mode: 'cheap', universe_master_size: 180 })
+    renderApp('/')
+    expect(await screen.findByTestId('universe-badge')).toHaveTextContent('CHEAP')
+
+    await userEvent.click(screen.getByTestId('universe-expensive'))
+    expect(screen.getByTestId('universe-dialog')).toBeInTheDocument()
+    await userEvent.click(screen.getByTestId('confirm-button'))
+
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(
+          (call) =>
+            String(call[0]).includes('/control/universe') &&
+            String(call[0]).includes('mode=expensive'),
+        ),
+      ).toBe(true),
     )
   })
 
@@ -455,6 +530,88 @@ describe('News intelligence', () => {
     expect(await screen.findByTestId('live-news-item')).toHaveTextContent(
       'Infosys board approves buyback',
     )
+  })
+
+  it('shows the AI token and cost counter on the dashboard', async () => {
+    stubBackend({}, {
+      ai_usage: {
+        calls: 12,
+        input_tokens: 1500000,
+        output_tokens: 60000,
+        estimated_cost_usd: 0.0042,
+        cost_configured: true,
+        by_model: {},
+        last_24h: { calls: 3, input_tokens: 9000, output_tokens: 900, estimated_cost_usd: null },
+        sources: {
+          reviews: { calls: 8, input_tokens: 1000000, output_tokens: 40000, estimated_cost_usd: null },
+          reconsiderations: { calls: 3, input_tokens: 400000, output_tokens: 15000, estimated_cost_usd: null },
+          news: { calls: 1, input_tokens: 100000, output_tokens: 5000, estimated_cost_usd: null },
+        },
+      },
+    })
+    renderApp('/')
+    expect(await screen.findByTestId('stat-ai-calls')).toHaveTextContent('12')
+    expect(await screen.findByTestId('stat-ai-input')).toHaveTextContent('1.5M')
+    expect(await screen.findByTestId('stat-ai-total')).toHaveTextContent('1.6M')
+    expect(await screen.findByTestId('stat-ai-cost')).toHaveTextContent('$0.0042')
+  })
+
+  it('shows a rates hint instead of a cost when rates are not configured', async () => {
+    stubBackend({}, {
+      ai_usage: {
+        calls: 2,
+        input_tokens: 3000,
+        output_tokens: 300,
+        estimated_cost_usd: null,
+        cost_configured: false,
+        by_model: {},
+        last_24h: { calls: 2, input_tokens: 3000, output_tokens: 300, estimated_cost_usd: null },
+        sources: {},
+      },
+    })
+    renderApp('/')
+    expect(await screen.findByTestId('stat-ai-cost')).toHaveTextContent('set rates')
+  })
+
+  it('lists each bot with its symbols, book, and recent decisions', async () => {
+    stubBackend({}, {}, [
+      {
+        index: 0,
+        name: 'Bot 1',
+        symbols: ['INFY', 'TCS'],
+        cash: '10000',
+        positions: [
+          { symbol: 'INFY', quantity: 10, average_entry_price: '1150.00', ltp: '1160.00', value: '11600.00', unrealized_pnl: '100.00' },
+        ],
+        reviews: 4,
+        ai_model: 'test-model',
+        recent_decisions: [
+          { decision_id: 'abc12345', symbol: 'INFY', status: 'EXECUTED', timestamp: '2026-10-22T06:46:15+00:00', ai_action: 'OPEN_POSITION' },
+        ],
+      },
+      {
+        index: 1,
+        name: 'Bot 2',
+        symbols: ['RELIANCE'],
+        cash: '10000',
+        positions: [],
+        reviews: 2,
+        ai_model: 'test-model',
+        recent_decisions: [],
+      },
+    ])
+    renderApp('/bots')
+    expect(await screen.findByText('Bot 1')).toBeInTheDocument()
+    expect(screen.getByText('Bot 2')).toBeInTheDocument()
+    expect(screen.getByText(/INFY, TCS/)).toBeInTheDocument()
+    expect(screen.getByTestId('bot-reviews-0')).toHaveTextContent('4')
+    expect(screen.getByText('abc12345'.slice(0, 8))).toBeInTheDocument()
+  })
+
+  it('explains an empty bots page when no session is attached', async () => {
+    stubBackend()
+    renderApp('/bots')
+    expect(await screen.findByText(/No reviewer bots are attached/)).toBeInTheDocument()
   })
 })
 
@@ -621,6 +778,116 @@ describe('Safe controls', () => {
     expect(screen.getByTestId('reset-dialog')).toBeInTheDocument()
   })
 
+  it('toggles the capital cap only after confirmation', async () => {
+    const { fetchMock } = stubBackend()
+    renderApp('/system')
+    await userEvent.click(await screen.findByTestId('control-capital-cap'))
+    expect(screen.getByTestId('capital-cap-dialog')).toBeInTheDocument()
+    await userEvent.click(screen.getByTestId('confirm-button'))
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some((call) =>
+          String(call[0]).includes('/control/capital-cap?disabled=true'),
+        ),
+      ).toBe(true),
+    )
+  })
+
+  it('shows when the capital cap is disabled', async () => {
+    stubBackend({ capital_cap_disabled: true })
+    renderApp('/system')
+    expect(await screen.findByTestId('system-capital-cap')).toHaveTextContent('DISABLED')
+    expect(screen.getByTestId('control-capital-cap')).toHaveTextContent('Restore capital cap')
+  })
+
+  it('toggles the position cap only after confirmation', async () => {
+    const { fetchMock } = stubBackend()
+    renderApp('/system')
+    await userEvent.click(await screen.findByTestId('control-position-cap'))
+    expect(screen.getByTestId('position-cap-dialog')).toBeInTheDocument()
+    await userEvent.click(screen.getByTestId('confirm-button'))
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some((call) =>
+          String(call[0]).includes('/control/position-cap?disabled=true'),
+        ),
+      ).toBe(true),
+    )
+  })
+
+  it('shows when the position cap is disabled', async () => {
+    stubBackend({ position_count_cap_disabled: true })
+    renderApp('/system')
+    expect(await screen.findByTestId('system-position-cap')).toHaveTextContent('DISABLED')
+    expect(screen.getByTestId('control-position-cap')).toHaveTextContent('Restore position cap')
+  })
+
+  it('toggles Tier-1 news only after confirmation', async () => {
+    const { fetchMock } = stubBackend()
+    renderApp('/system')
+    await userEvent.click(await screen.findByTestId('control-tier1-news'))
+    expect(screen.getByTestId('tier1-news-dialog')).toBeInTheDocument()
+    await userEvent.click(screen.getByTestId('confirm-button'))
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some((call) =>
+          String(call[0]).includes('/control/tier1-news?enabled=false'),
+        ),
+      ).toBe(true),
+    )
+  })
+
+  it('shows when Tier-1 news is off', async () => {
+    stubBackend({ tier1_news_enabled: false })
+    renderApp('/system')
+    expect(await screen.findByTestId('system-tier1-news')).toHaveTextContent('OFF')
+    expect(screen.getByTestId('control-tier1-news')).toHaveTextContent('Turn on Tier-1 news')
+  })
+
+  it('toggles news analysis only after confirmation', async () => {
+    const { fetchMock } = stubBackend()
+    renderApp('/system')
+    await userEvent.click(await screen.findByTestId('control-news-analysis'))
+    expect(screen.getByTestId('news-analysis-dialog')).toBeInTheDocument()
+    await userEvent.click(screen.getByTestId('confirm-button'))
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some((call) =>
+          String(call[0]).includes('/control/news-analysis?enabled=false'),
+        ),
+      ).toBe(true),
+    )
+  })
+
+  it('shows when news analysis is off', async () => {
+    stubBackend({ news_analysis_enabled: false })
+    renderApp('/system')
+    expect(await screen.findByTestId('system-news-analysis')).toHaveTextContent('OFF')
+    expect(screen.getByTestId('control-news-analysis')).toHaveTextContent('Turn on news analysis')
+  })
+
+  it('toggles Sonnet escalation only after confirmation', async () => {
+    const { fetchMock } = stubBackend()
+    renderApp('/system')
+    await userEvent.click(await screen.findByTestId('control-sonnet-escalation'))
+    expect(screen.getByTestId('sonnet-escalation-dialog')).toBeInTheDocument()
+    await userEvent.click(screen.getByTestId('confirm-button'))
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some((call) =>
+          String(call[0]).includes('/control/sonnet-escalation?enabled=false'),
+        ),
+      ).toBe(true),
+    )
+  })
+
+  it('shows when Sonnet escalation is off', async () => {
+    stubBackend({ sonnet_escalation_enabled: false })
+    renderApp('/system')
+    expect(await screen.findByTestId('system-sonnet-escalation')).toHaveTextContent('OFF')
+    expect(screen.getByTestId('control-sonnet-escalation')).toHaveTextContent('Turn on Sonnet escalation')
+  })
+
   it('exposes no buy or sell control anywhere on the system page', async () => {
     stubBackend()
     const { container } = renderApp('/system')
@@ -636,6 +903,20 @@ describe('Safe controls', () => {
     await waitFor(() =>
       expect(screen.getByTestId('system-live-execution')).toHaveTextContent('DISABLED'),
     )
+  })
+
+  it('shows the permanent closed-trade record with realized P&L', async () => {
+    stubBackend()
+    renderApp('/trades')
+    await screen.findByText('Closed trades — permanent record')
+    expect(screen.getByText('INFY')).toBeInTheDocument()
+    // Gross +120 on 10 shares @100 -> @112, net of 1.12 charges. Gross appears
+    // on the row and the summary card; net appears on the row and the total.
+    expect(screen.getAllByText('+₹120.00')).toHaveLength(2)
+    expect(screen.getAllByText('+₹118.88')).toHaveLength(2)
+    expect(screen.getByText('Charges paid')).toBeInTheDocument()
+    expect(screen.getAllByText('₹1.12')).toHaveLength(2)
+    expect(screen.getByText('Realized P&L (net)')).toBeInTheDocument()
   })
 })
 

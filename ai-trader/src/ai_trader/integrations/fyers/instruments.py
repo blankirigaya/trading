@@ -17,6 +17,19 @@ SYMBOL_PATTERN = re.compile(
 NSE_EQUITY_SEGMENT = "nse_cm"
 BSE_EQUITY_SEGMENT = "bse_cm"
 
+# Segment prefix (first 4 chars of a raw FYERS token) to HSM segment name,
+# mirroring the reference fyers_apiv3 SDK's exch_seg_dict.
+EXCHANGE_SEGMENTS = {
+    "1010": "nse_cm",
+    "1011": "nse_fo",
+    "1020": "nse_com",
+    "1120": "mcx_fo",
+    "1210": "bse_cm",
+    "1211": "bse_fo",
+    "1212": "bcs_fo",
+    "1012": "cde_fo",
+}
+
 
 class InvalidFyersSymbol(ValueError):
     """The configured symbol is not a supported FYERS equity symbol."""
@@ -41,11 +54,19 @@ class FyersSymbol:
             return BSE_EQUITY_SEGMENT
         return None
 
-    def hsm_topic(self, token: int) -> str:
-        segment = self.segment_token
-        if segment is None:
-            raise InvalidFyersSymbol(f"unsupported FYERS exchange: {self.exchange}")
-        return f"sf|{segment}|{token}"
+    def hsm_topic(self, fytoken: str) -> str:
+        """Build the HSM topic for a raw FYERS token such as ``10100000001594``.
+
+        The wire topic uses the segment for the token's 4-char prefix and the
+        token suffix after the 10-char exchange header (``sf|nse_cm|1594``),
+        mirroring the reference SDK. Falls back to the exchange segment when
+        the prefix is unknown.
+        """
+        segment = EXCHANGE_SEGMENTS.get(fytoken[:4], self.segment_token)
+        suffix = fytoken[10:] if len(fytoken) > 10 else fytoken
+        if segment is None or not suffix:
+            raise InvalidFyersSymbol(f"cannot build HSM topic for token: {fytoken!r}")
+        return f"sf|{segment}|{suffix}"
 
 
 def parse_symbol(symbol: str) -> FyersSymbol:
@@ -58,6 +79,15 @@ def parse_symbol(symbol: str) -> FyersSymbol:
         suffix=match.group("suffix"),
         text=symbol.strip().upper(),
     )
+
+
+def hsm_token_suffix(fytoken: str) -> int:
+    """Return the numeric HSM topic token for a raw FYERS token string."""
+    suffix = fytoken[10:] if len(fytoken) > 10 else fytoken
+    try:
+        return int(suffix)
+    except ValueError as exc:
+        raise InvalidFyersSymbol(f"non-numeric FYERS token: {fytoken!r}") from exc
 
 
 def to_instrument(symbol: str, token: int | None = None) -> Instrument:

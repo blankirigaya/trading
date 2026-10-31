@@ -23,7 +23,7 @@ from ai_trader.domain.decisions import (
     ProviderMetadata,
     TradeProposal,
 )
-from ai_trader.domain.market import Instrument, MarketState, MarketTick
+from ai_trader.domain.market import Candle, Instrument, MarketState, MarketTick
 from ai_trader.domain.orders import OrderSide
 from ai_trader.integrations.fyers.probe import (
     CONNECTED_AND_DECODED,
@@ -37,6 +37,7 @@ def _settings(database_url: str = "sqlite:///./unused.db") -> Settings:
         app_mode="LIVE_SHADOW",
         trading_enabled=True,
         database_url=database_url,
+        ai_provider="remote_openai_compatible",
         ai_base_url="http://192.168.1.25:8080/v1",
         ai_model="server-model-id",
         ai_api_key="top-secret-key",
@@ -50,7 +51,7 @@ def _settings(database_url: str = "sqlite:///./unused.db") -> Settings:
 def _market_state() -> MarketState:
     from datetime import UTC, datetime
 
-    now = datetime(2026, 10, 1, 10, 0, tzinfo=UTC)
+    now = datetime.now(UTC)
     tick = MarketTick(
         symbol="INFY",
         exchange="NSE",
@@ -61,6 +62,15 @@ def _market_state() -> MarketState:
         processed_timestamp=now,
         raw_payload={"feeds": {"NSE_EQ|INE009A01021": {"ltpc": {"ltp": 1500.25}}}},
     )
+    candle = Candle(
+        start_timestamp=now,
+        end_timestamp=now,
+        open=Decimal("1491.00"),
+        high=Decimal("1510.00"),
+        low=Decimal("1485.00"),
+        close=Decimal("1500.25"),
+        volume=1_250_000,
+    )
     return MarketState(
         snapshot_id="snapshot-acceptance",
         instrument=Instrument(instrument_key="NSE_EQ|INE009A01021", symbol="INFY", exchange="NSE"),
@@ -68,6 +78,10 @@ def _market_state() -> MarketState:
         last_price=Decimal("1500.25"),
         previous_close=Decimal("1490.10"),
         recent_ticks=[tick],
+        current_1m_candle=candle,
+        recent_1m_candles=[candle],
+        bid=Decimal("1500.20"),
+        ask=Decimal("1500.30"),
     )
 
 
@@ -96,7 +110,9 @@ def db_url(tmp_path):
 
 
 async def test_market_probe_fails_closed_without_credential() -> None:
-    result = await probe_fyers(Settings(), ["NSE:INFY-EQ"])
+    result = await probe_fyers(
+        Settings(fyers_client_id="", fyers_access_token=""), ["NSE:INFY-EQ"]
+    )
     assert result.ok is False
     assert result.states == []
     assert any("credential" in line for line in result.lines)
@@ -116,7 +132,7 @@ async def test_gate_blocks_workflow_when_a_probe_fails(monkeypatch) -> None:
 
         return AIProbeResult(False, ["JEV CONFIG: JEV_API_KEY is not configured"])
 
-    monkeypatch.setattr(shadow_run, "probe_market", fake_market)
+    monkeypatch.setattr(shadow_run, "probe_fyers", fake_market)
     monkeypatch.setattr(shadow_run, "probe_ai", fake_ai)
     monkeypatch.setattr(shadow_run, "probe_jev", fake_jev)
 
@@ -126,6 +142,30 @@ async def test_gate_blocks_workflow_when_a_probe_fails(monkeypatch) -> None:
     assert jev.passed is False
     # The gate is conjunctive: one failure blocks the run.
     assert not (market.passed and ai.passed and jev.passed)
+
+
+async def test_gate_passes_jev_vacuously_when_disabled(monkeypatch) -> None:
+    async def fake_market(settings, symbols=None):
+        return FyersProbeResult(True, CONNECTED_AND_DECODED, [_market_state()], ["ok"])
+
+    async def fake_ai(settings):
+        from ai_trader.integrations.connectivity import AIProbeResult
+
+        return AIProbeResult(True, ["reachable: yes"])
+
+    async def boom_jev(settings):
+        raise AssertionError("probe_jev must not run when Jev is disabled")
+
+    monkeypatch.setattr(shadow_run, "probe_fyers", fake_market)
+    monkeypatch.setattr(shadow_run, "probe_ai", fake_ai)
+    monkeypatch.setattr(shadow_run, "probe_jev", boom_jev)
+
+    settings = _settings().model_copy(update={"jev_enabled": False})
+    market, ai, jev = await run_integration_gate(settings, ["NSE:INFY-EQ"])
+    assert market.passed is True
+    assert ai.passed is True
+    assert jev.passed is True
+    assert any("disabled" in line for line in jev.lines)
 
 
 async def test_one_shadow_run_persists_three_stages_and_formats_summary(

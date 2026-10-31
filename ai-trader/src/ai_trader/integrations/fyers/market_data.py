@@ -33,19 +33,41 @@ class FyersMarketDataService:
         self.ticks: dict[str, deque[MarketState]] = {
             key: deque(maxlen=MAX_TICKS_PER_INSTRUMENT) for key in instruments
         }
+        # Update frames carry only the numeric topic id; snapshots provide the
+        # id -> topic name mapping that resolves them.
+        self.topic_names: dict[int, str] = {}
         self.decoded_count = 0
         self.snapshot_count = 0
         self.update_count = 0
         self.last_error: str | None = None
+        # Wall-clock of the last datafeed frame, whatever it carried, and of the
+        # last frame that actually produced a usable tick. A connected-but-silent
+        # socket is the failure mode the reconnect logic cannot see, so the
+        # session watchdog reads these to prod it. Freshness is measured from
+        # ``last_state_at``: a socket that only delivers undecodable frames is
+        # stalled even though it is busy.
+        self.last_frame_at: datetime | None = None
+        self.last_state_at: datetime | None = None
 
     def ingest_frame(self, connection_id: str, payload: bytes) -> list[MarketState]:
         """Decode one binary frame into zero or more market states."""
         if not is_market_data_frame(payload):
             return []
+        self.last_frame_at = self.clock.now()
         _, feeds = decode_binary_frame(payload)
         produced: list[MarketState] = []
         for feed in feeds:
-            instrument = self.instruments.get(feed.topic_name)
+            if feed.topic_name is not None:
+                self.topic_names[feed.topic_id] = feed.topic_name
+                topic_name: str | None = feed.topic_name
+            else:
+                topic_name = self.topic_names.get(feed.topic_id)
+            if topic_name is None:
+                self.last_error = (
+                    f"update for unknown topic id {feed.topic_id}; no snapshot seen yet"
+                )
+                continue
+            instrument = self.instruments.get(topic_name)
             if instrument is None:
                 continue
             if feed.data_type not in (DataType.SNAPSHOT, DataType.UPDATE, DataType.LITE):
@@ -63,7 +85,7 @@ class FyersMarketDataService:
                 self.snapshot_count += 1
             else:
                 self.update_count += 1
-            self._merge(feed.topic_name, state)
+            self._merge(topic_name, state)
             produced.append(state)
         return produced
 
@@ -82,6 +104,7 @@ class FyersMarketDataService:
             )
         history.append(state)
         self.states[topic] = state
+        self.last_state_at = self.clock.now()
 
     def latest(self, topic: str) -> MarketState | None:
         return self.states.get(topic)
@@ -105,3 +128,22 @@ class FyersMarketDataService:
         if state is None:
             return None
         return (now - state.timestamp).total_seconds()
+
+    def idle_seconds(self, now: datetime) -> float | None:
+        """Seconds since the last usable tick, or None if none yet.
+
+        Deliberately ignores frames that decoded to nothing (unknown topic ids,
+        payloads without a price). Counting those as life would make a socket
+        that is chattering but delivering no prices look healthy, and the
+        reconnect watchdog would never prod it.
+        """
+        marker = self.last_state_at or self.last_frame_at
+        if marker is None:
+            return None
+        return (now - marker).total_seconds()
+
+    def newest_state_age_seconds(self, now: datetime) -> float | None:
+        """Age of the freshest stored state, or None before the first tick."""
+        if not self.states:
+            return None
+        return min((now - state.timestamp).total_seconds() for state in self.states.values())

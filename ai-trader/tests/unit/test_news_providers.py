@@ -15,6 +15,7 @@ from ai_trader.news.dedup import (
     canonical_url_key,
     content_hash_for,
     headline_hash_for,
+    normalize_content_for_hash,
     normalize_headline,
 )
 from ai_trader.news.documents import (
@@ -223,6 +224,24 @@ def test_headline_normalization_ignores_case_punctuation_stopwords() -> None:
 def test_different_headlines_hash_differently() -> None:
     assert headline_hash_for("RBI holds rate") != headline_hash_for("RBI cuts rate")
     assert content_hash_for("body one") != content_hash_for("body two")
+
+
+def test_normalize_content_strips_volatile_fragments() -> None:
+    base = "Infosys said the deal will be recognised over four quarters."
+    assert normalize_content_for_hash(base) == normalize_content_for_hash(
+        "Infosys said the deal will be recognised over four quarters. Updated at 10:47 IST."
+    )
+    assert normalize_content_for_hash("Markets rallied 2% in afternoon trade.") == (
+        normalize_content_for_hash("Markets rallied 2% in afternoon trade. 3 hours ago")
+    )
+    assert normalize_content_for_hash("") == ""
+    assert normalize_content_for_hash(None) == ""
+
+
+def test_normalize_content_keeps_material_changes() -> None:
+    before = "Infosys said the deal will be recognised over four quarters."
+    after = "Infosys cancelled the deal citing regulatory concerns."
+    assert normalize_content_for_hash(before) != normalize_content_for_hash(after)
 
 
 # --- clustering ------------------------------------------------------------

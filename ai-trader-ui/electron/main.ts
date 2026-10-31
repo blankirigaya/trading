@@ -30,6 +30,10 @@ function createWindow(): BrowserWindow {
       nodeIntegration: false,
       sandbox: true,
       webSecurity: true,
+      // Keep the 1s price poll running while the window is in the background.
+      // Chromium otherwise throttles timers in unfocused/hidden windows, which
+      // made live prices freeze the moment another app was clicked.
+      backgroundThrottling: false,
     },
   })
 

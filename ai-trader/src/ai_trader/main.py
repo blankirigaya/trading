@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -25,8 +27,17 @@ ALLOWED_ORIGINS = [
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # Record which loop uvicorn actually built. The selector loop is what keeps
+    # the accept path alive through Wi-Fi flaps (see ai_trader.serve), so this is
+    # the one line to check when the API goes dark on a live process.
+    logging.getLogger(__name__).info(
+        "asyncio event loop: %s", type(asyncio.get_running_loop()).__name__
+    )
     yield
-    # Release pooled network resources on shutdown.
+    # Stop an attached shadow session, then release pooled network resources.
+    runtime = app.state.container.runtime
+    if runtime is not None and runtime.running:
+        await runtime.stop()
     await app.state.container.aclose()
 
 

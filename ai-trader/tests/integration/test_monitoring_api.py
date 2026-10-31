@@ -78,11 +78,102 @@ def test_control_review_requires_runtime(client: TestClient) -> None:
 
 
 def test_control_start_requires_runtime(client: TestClient) -> None:
-    assert client.post("/control/start").status_code == 409
+    assert client.post("/control/review").status_code == 409
+
+
+class _StubRuntime:
+    running = False
+
+    async def start(self) -> None:
+        self.running = True
+
+    async def stop(self) -> None:
+        self.running = False
+
+    async def review_once(self) -> None:
+        return None
+
+
+def test_control_start_attaches_and_starts_runtime(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ai_trader.application import container as container_module
+
+    def fake_attach(self) -> _StubRuntime:
+        self.runtime = _StubRuntime()
+        return self.runtime
+
+    async def fake_attach_async(self) -> _StubRuntime:
+        return fake_attach(self)
+
+    monkeypatch.setattr(container_module.Container, "attach_runtime", fake_attach_async)
+    assert client.post("/control/start").json() == {"running": True}
+    assert client.get("/system/status").json()["session_running"] is True
+    assert client.post("/control/stop").json() == {"running": False}
 
 
 def test_control_stop_is_safe_without_runtime(client: TestClient) -> None:
     assert client.post("/control/stop").json()["running"] is False
+
+
+def test_portfolio_equity_counts_blocked_margin_and_realized_pnl() -> None:
+    """Cash alone understates the book, and a closed round trip must still count."""
+    import asyncio
+    from decimal import Decimal
+
+    from ai_trader.brokers.paper import PaperBroker
+    from ai_trader.domain.common import SystemClock
+    from ai_trader.domain.orders import OrderRequest, OrderSide, OrderType
+    from ai_trader.main import create_app
+
+    def order(side: OrderSide, quantity: int) -> OrderRequest:
+        return OrderRequest(
+            client_order_id=f"c-{side.value}",
+            decision_id=f"d-{side.value}",
+            correlation_id="c",
+            symbol="T",
+            exchange="NSE",
+            segment="EQ",
+            side=side,
+            order_type=OrderType.MARKET,
+            quantity=quantity,
+            requested_allocation=Decimal("100000"),
+            actual_order_value=Decimal("100000"),
+            conversion_reason="test",
+        )
+
+    app = create_app()
+    broker = PaperBroker(
+        Decimal("100000"),
+        SystemClock(),
+        {"T": Decimal("100")},
+        margin_multiple=Decimal("5"),
+    )
+    app.state.container.shard_brokers = []
+    app.state.container.broker = broker
+    client = TestClient(app)
+
+    asyncio.run(broker.place_order(order(OrderSide.BUY, 10)))
+
+    # 10 x 100 at a 5x margin multiple blocks 200 of cash, so equity is the full
+    # 100000 even though cash reads 99800.
+    body = client.get("/portfolio").json()
+    assert Decimal(body["cash"]) == Decimal("99800")
+    assert Decimal(body["equity"]) == Decimal("100000")
+
+    broker.set_price("T", Decimal("105"))
+    asyncio.run(broker.place_order(order(OrderSide.SELL, 10)))
+
+    # The position row is gone, but the round trip's P&L is not.
+    body = client.get("/portfolio").json()
+    assert body["positions"] == []
+    assert Decimal(body["realized_pnl"]) == Decimal("50")
+    assert Decimal(body["equity"]) == Decimal("100050")
+
+    performance = client.get("/performance").json()
+    assert Decimal(performance["realized_pnl"]) == Decimal("50")
+    assert Decimal(performance["total_pnl"]) == Decimal("50")
+    assert Decimal(performance["cash"]) == Decimal("100050")
 
 
 def test_kill_switch_toggles_and_emits_event(client: TestClient) -> None:

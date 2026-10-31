@@ -9,9 +9,11 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Callable
+from typing import Any
 from uuid import uuid4
 
 import websockets
+from websockets.asyncio.client import ClientConnection
 
 from ai_trader.integrations.fyers.auth import CHANNEL, CLIENT_SOURCE, FyersAuth, extract_hsm_key
 from ai_trader.integrations.fyers.protocol import (
@@ -56,6 +58,10 @@ class FyersDataSocket:
         self.reconnect_count = 0
         self.message_count = 0
         self._stop = asyncio.Event()
+        # Live session handle, set inside _session and cleared on exit, so an
+        # external watchdog can drop a silently stalled connection and let
+        # run() reconnect and resubscribe on its own.
+        self._ws: Any = None
 
     @property
     def lite_mode(self) -> bool:
@@ -67,6 +73,20 @@ class FyersDataSocket:
 
     async def stop(self) -> None:
         self._stop.set()
+
+    async def reconnect(self) -> bool:
+        """Drop the live session so ``run()`` reconnects and resubscribes.
+
+        Returns True when a session was prodded, False when there was nothing
+        to drop (``run()`` connects on its own in that case).
+        """
+        ws, self._ws = self._ws, None
+        if ws is None:
+            return False
+        self.connected = False
+        with contextlib.suppress(Exception):
+            await ws.close()
+        return True
 
     async def run(self) -> None:
         """Connect, authenticate, subscribe, and stream until stopped.
@@ -101,46 +121,56 @@ class FyersDataSocket:
             ping_timeout=20,
             additional_headers={"Authorization": self.auth.authorization_header},
         ) as socket:
-            await socket.send(build_auth_message(hsm_key, mode, CLIENT_SOURCE))
+            self._ws = socket
+            try:
+                await self._run_session(socket, self.connection_id or "", hsm_key, mode, marker)
+            finally:
+                self._ws = None
 
-            auth_response = _require_bytes(await asyncio.wait_for(socket.recv(), timeout=15))
-            envelope = parse_envelope(auth_response)
-            if not envelope.is_ok:
-                raise ConnectionError("FYERS data socket rejected authentication")
-            ack_count = envelope.ack_count() or 1
+    async def _run_session(
+        self, socket: ClientConnection, connection_id: str, hsm_key: str, mode: Mode, marker: int
+    ) -> None:
+        """Authenticate, subscribe, and stream until stopped or dropped."""
+        await socket.send(build_auth_message(hsm_key, mode, CLIENT_SOURCE))
 
-            await socket.send(build_channel_bitmap_message(ReqType.FULL_MODE, CHANNEL, marker))
-            channel_response = _require_bytes(await asyncio.wait_for(socket.recv(), timeout=15))
-            if not parse_envelope(channel_response).is_ok:
-                raise ConnectionError("FYERS data socket rejected the channel request")
+        auth_response = _require_bytes(await asyncio.wait_for(socket.recv(), timeout=15))
+        envelope = parse_envelope(auth_response)
+        if not envelope.is_ok:
+            raise ConnectionError("FYERS data socket rejected authentication")
+        ack_count = envelope.ack_count() or 1
 
-            if self.subscribe_topics:
-                await socket.send(
-                    build_subscribe_message(
-                        self.subscribe_topics,
-                        CHANNEL,
-                        self.auth.authorization_header,
-                        CLIENT_SOURCE,
-                    )
+        await socket.send(build_channel_bitmap_message(ReqType.FULL_MODE, CHANNEL, marker))
+        channel_response = _require_bytes(await asyncio.wait_for(socket.recv(), timeout=15))
+        if not parse_envelope(channel_response).is_ok:
+            raise ConnectionError("FYERS data socket rejected the channel request")
+
+        if self.subscribe_topics:
+            await socket.send(
+                build_subscribe_message(
+                    self.subscribe_topics,
+                    CHANNEL,
+                    self.auth.authorization_header,
+                    CLIENT_SOURCE,
                 )
+            )
 
-            self.connected = True
-            logger.info("fyers data socket connected")
+        self.connected = True
+        logger.info("fyers data socket connected")
 
-            since_ack = 0
-            async for frame in socket:
-                if self._stop.is_set():
-                    break
-                if not isinstance(frame, bytes):
-                    continue
-                self.message_count += 1
-                self.on_frame(self.connection_id, frame)
-                if frame[2] == ReqType.DATAFEED:
-                    since_ack += 1
-                    if since_ack >= ack_count:
-                        since_ack = 0
-                        with contextlib.suppress(Exception):
-                            await socket.send(build_ack_message(_message_num(frame)))
+        since_ack = 0
+        async for frame in socket:
+            if self._stop.is_set():
+                break
+            if not isinstance(frame, bytes):
+                continue
+            self.message_count += 1
+            self.on_frame(connection_id, frame)
+            if frame[2] == ReqType.DATAFEED:
+                since_ack += 1
+                if since_ack >= ack_count:
+                    since_ack = 0
+                    with contextlib.suppress(Exception):
+                        await socket.send(build_ack_message(_message_num(frame)))
 
     async def unsubscribe(self) -> bytes | None:
         """Build the unsubscribe frame for the current topics, if any.

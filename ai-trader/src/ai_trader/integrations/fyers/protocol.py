@@ -107,6 +107,10 @@ PRICE_SCALED_FIELDS: frozenset[str] = frozenset(
 
 PRICE_SCALE = 100
 
+# INT32_MIN marks a missing value on the wire. Values stay positional so the
+# field mapping never shifts; as_mapping() drops these instead.
+NULL_VALUE = -(2**31)
+
 
 def _push_field(buffer: bytearray, field_id: int, value: bytes) -> None:
     buffer.append(field_id)
@@ -233,13 +237,13 @@ def parse_envelope(data: bytes) -> Envelope:
 class ScripFeed:
     data_type: int
     topic_id: int
-    topic_name: str
+    topic_name: str | None
     values: tuple[int, ...]
 
     def schema(self) -> tuple[str, ...]:
         if self.data_type == DataType.LITE:
             return LITE_VAL_FIELDS
-        prefix = self.topic_name.split("|", 1)[0]
+        prefix = (self.topic_name or "").split("|", 1)[0]
         if prefix == "if":
             return INDEX_VAL_FIELDS
         return DATA_VAL_FIELDS
@@ -248,8 +252,8 @@ class ScripFeed:
         """Map the scrip's i32 values onto named fields, un-scaling prices."""
         mapping: dict[str, int | float] = {}
         for index, raw in enumerate(self.values):
-            if index >= len(self.schema()):
-                break
+            if index >= len(self.schema()) or raw == NULL_VALUE:
+                continue
             name = self.schema()[index]
             if name in PRICE_SCALED_FIELDS:
                 mapping[name] = raw / PRICE_SCALE
@@ -259,7 +263,13 @@ class ScripFeed:
 
 
 def parse_datafeed(data: bytes) -> tuple[int, tuple[ScripFeed, ...]]:
-    """Return ``(message_num, feeds)`` for a datafeed frame."""
+    """Return ``(message_num, feeds)`` for a datafeed frame.
+
+    Snapshot frames (``0x53``) carry the HSM topic name; update and lite frames
+    (``0x55``/``0x4C``) carry only the numeric topic id, which the caller resolves
+    against the names seen on snapshots. Topic ids are little-endian, matching the
+    reference SDK. INT32_MIN (``-2147483648``) marks a missing value and is dropped.
+    """
     if len(data) < 9:
         raise ProtocolError(f"datafeed frame under 9 bytes: {len(data)}")
     message_num = int.from_bytes(data[3:7], "big")
@@ -267,21 +277,27 @@ def parse_datafeed(data: bytes) -> tuple[int, tuple[ScripFeed, ...]]:
     offset = 9
     feeds: list[ScripFeed] = []
     for index in range(scrip_count):
-        if offset + 4 > len(data):
+        if offset + 3 > len(data):
             raise ProtocolError(f"datafeed scrip {index}: truncated header")
         data_type = data[offset]
         offset += 1
-        topic_id = int.from_bytes(data[offset : offset + 2], "big")
+        topic_id = int.from_bytes(data[offset : offset + 2], "little")
         offset += 2
-        name_len = data[offset]
-        offset += 1
-        if offset + name_len + 1 > len(data):
-            raise ProtocolError(f"datafeed scrip {index}: truncated topic name")
-        try:
-            topic_name = data[offset : offset + name_len].decode()
-        except UnicodeDecodeError as exc:
-            raise ProtocolError(f"datafeed scrip {index}: non-UTF8 topic name") from exc
-        offset += name_len
+        topic_name: str | None = None
+        if data_type == DataType.SNAPSHOT:
+            if offset + 1 > len(data):
+                raise ProtocolError(f"datafeed scrip {index}: truncated topic name length")
+            name_len = data[offset]
+            offset += 1
+            if offset + name_len + 1 > len(data):
+                raise ProtocolError(f"datafeed scrip {index}: truncated topic name")
+            try:
+                topic_name = data[offset : offset + name_len].decode()
+            except UnicodeDecodeError as exc:
+                raise ProtocolError(f"datafeed scrip {index}: non-UTF8 topic name") from exc
+            offset += name_len
+        if offset + 1 > len(data):
+            raise ProtocolError(f"datafeed scrip {index}: truncated field count")
         field_count = data[offset]
         offset += 1
         if offset + field_count * 4 > len(data):
@@ -293,8 +309,31 @@ def parse_datafeed(data: bytes) -> tuple[int, tuple[ScripFeed, ...]]:
             for i in range(field_count)
         )
         offset += field_count * 4
+        if data_type == DataType.SNAPSHOT:
+            # Snapshots append a trailer after the values: a multiplier, a
+            # precision, two reserved bytes, and three labelled strings
+            # (exchange, exchange token, symbol). The values are not needed
+            # downstream, but the bytes must be skipped so the next scrip in
+            # a multi-symbol frame starts at the right offset.
+            offset = _skip_snapshot_trailer(data, offset, index)
         feeds.append(ScripFeed(data_type, topic_id, topic_name, values))
     return message_num, tuple(feeds)
+
+
+def _skip_snapshot_trailer(data: bytes, offset: int, index: int) -> int:
+    """Skip the post-values trailer of a snapshot scrip. Returns the new offset."""
+    if offset + 5 > len(data):
+        raise ProtocolError(f"datafeed scrip {index}: truncated snapshot trailer")
+    offset += 5  # multiplier u16 + precision u8 + 2 reserved bytes
+    for _ in range(3):
+        if offset + 1 > len(data):
+            raise ProtocolError(f"datafeed scrip {index}: truncated snapshot label")
+        string_len = data[offset]
+        offset += 1
+        if offset + string_len > len(data):
+            raise ProtocolError(f"datafeed scrip {index}: truncated snapshot label")
+        offset += string_len
+    return offset
 
 
 def ticker_from_topic(topic: str) -> str:

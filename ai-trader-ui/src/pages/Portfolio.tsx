@@ -21,7 +21,10 @@ export function Portfolio() {
     (sum, position) => sum + toNumber(position.average_entry_price) * position.quantity,
     0,
   )
-  const total = cash + invested + toNumber(portfolio.unrealized_pnl)
+  const total =
+    portfolio.equity === undefined
+      ? cash + invested + toNumber(portfolio.unrealized_pnl)
+      : toNumber(portfolio.equity)
   const starting = toNumber(status?.shadow_initial_capital_inr) || total
 
   const allocation = [
@@ -48,6 +51,17 @@ export function Portfolio() {
             label="Realized P&L"
             value={formatSignedInr(portfolio.realized_pnl)}
             tone={toNumber(portfolio.realized_pnl) < 0 ? 'neg' : 'pos'}
+          />
+          <Stat
+            label="Charges paid"
+            value={formatInr(portfolio.charges_paid ?? 0)}
+            tone="neg"
+            testId="portfolio-charges-paid"
+          />
+          <Stat
+            label="Gross realized P&L"
+            value={formatSignedInr(portfolio.gross_realized_pnl ?? portfolio.realized_pnl)}
+            tone={toNumber(portfolio.gross_realized_pnl ?? portfolio.realized_pnl) < 0 ? 'neg' : 'pos'}
           />
           <Stat
             label="Unrealized P&L"

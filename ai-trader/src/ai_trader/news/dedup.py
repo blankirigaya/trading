@@ -51,6 +51,44 @@ _STOPWORDS = frozenset(
 )
 
 
+# Volatile fragments that change between polls without changing the story:
+# clock times, calendar dates, "updated" stamps, relative ages, and URLs.
+# Stripped before content comparison so a re-polled item is not mistaken
+# for a genuine correction (and re-analysed at AI cost).
+_TIME_RE = re.compile(r"\b\d{1,2}:\d{2}(?::\d{2})?\s*(?:ist|gmt|utc|am|pm)?\b", re.IGNORECASE)
+_DATE_RE = re.compile(
+    r"\b\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{2,4}\b"
+    r"|\b\d{4}-\d{2}-\d{2}\b"
+    r"|\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b",
+    re.IGNORECASE,
+)
+_UPDATED_RE = re.compile(
+    r"\bupdated(?:\s+(?:on|at))?\b[^,.|;]*", re.IGNORECASE
+)
+_RELATIVE_AGE_RE = re.compile(
+    r"\b\d+\s+(?:second|minute|hour|day|week)s?\s+ago\b", re.IGNORECASE
+)
+_URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
+
+
+def normalize_content_for_hash(text: str | None) -> str:
+    """Content with volatile, non-informative fragments removed.
+
+    Used only to decide whether a re-polled item carries *new* information.
+    Storage and AI prompts always keep the original text.
+    """
+    if not text:
+        return ""
+    cleaned = text.lower()
+    cleaned = _URL_RE.sub(" ", cleaned)
+    cleaned = _UPDATED_RE.sub(" ", cleaned)
+    cleaned = _RELATIVE_AGE_RE.sub(" ", cleaned)
+    cleaned = _TIME_RE.sub(" ", cleaned)
+    cleaned = _DATE_RE.sub(" ", cleaned)
+    cleaned = _PUNCT_RE.sub(" ", cleaned)
+    return _WS_RE.sub(" ", cleaned).strip()
+
+
 def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 

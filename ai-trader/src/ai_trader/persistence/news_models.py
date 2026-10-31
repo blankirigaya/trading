@@ -5,11 +5,11 @@ ORM rows never leave `persistence`; the repository returns domain models.
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Index, String, Table, Text
+from sqlalchemy import Index, String, Table, Text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Mapped, mapped_column
 
-from ai_trader.persistence.models import Base, JSONType
+from ai_trader.persistence.models import Base, JSONType, UTCDateTime
 
 
 class NewsSourceRow(Base):
@@ -25,7 +25,7 @@ class NewsSourceRow(Base):
     poll_interval_seconds: Mapped[int] = mapped_column(default=900)
     allowed_document_hosts: Mapped[list[str]] = mapped_column(JSONType, default=list)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(timezone=True), nullable=False)
 
 
 class NewsItemRow(Base):
@@ -41,10 +41,10 @@ class NewsItemRow(Base):
     canonical_url: Mapped[str] = mapped_column(Text, nullable=False, index=True)
     url: Mapped[str] = mapped_column(Text, nullable=False)
     published_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, index=True
+        UTCDateTime(timezone=True), nullable=False, index=True
     )
     received_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, index=True
+        UTCDateTime(timezone=True), nullable=False, index=True
     )
     category: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
     company: Mapped[str | None] = mapped_column(String(200), nullable=True)
@@ -72,13 +72,13 @@ class NewsEventClusterRow(Base):
     cluster_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     canonical_headline: Mapped[str] = mapped_column(Text, nullable=False)
     representative_item_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(UTCDateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(UTCDateTime(timezone=True), nullable=False)
     symbols: Mapped[list[str]] = mapped_column(JSONType, default=list)
     highest_trust_level: Mapped[str] = mapped_column(String(32), nullable=False)
     member_count: Mapped[int] = mapped_column(default=1)
     duplicate_count: Mapped[int] = mapped_column(default=0)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(timezone=True), nullable=False)
 
 
 class NewsClusterMemberRow(Base):
@@ -87,7 +87,7 @@ class NewsClusterMemberRow(Base):
     cluster_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     item_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     source_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    added_at: Mapped[datetime] = mapped_column(UTCDateTime(timezone=True), nullable=False)
     is_representative: Mapped[bool] = mapped_column(default=False)
 
 
@@ -100,7 +100,7 @@ class NewsDocumentRow(Base):
     sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     content_type: Mapped[str] = mapped_column(String(120), nullable=False)
     byte_size: Mapped[int] = mapped_column(default=0)
-    downloaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    downloaded_at: Mapped[datetime] = mapped_column(UTCDateTime(timezone=True), nullable=False)
     local_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     extracted_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     text_truncated: Mapped[bool] = mapped_column(default=False)
@@ -124,22 +124,22 @@ class NewsAnalysisRow(Base):
     evidence: Mapped[list[str]] = mapped_column(JSONType, default=list)
     uncertainties: Mapped[list[str]] = mapped_column(JSONType, default=list)
     analysis_started_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        UTCDateTime(timezone=True), nullable=True
     )
     analysis_completed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        UTCDateTime(timezone=True), nullable=True
     )
     portfolio_review_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        UTCDateTime(timezone=True), nullable=True
     )
     # Full news-to-trade latency chain, recorded as it happens.
     portfolio_review_started_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        UTCDateTime(timezone=True), nullable=True
     )
     portfolio_decision_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        UTCDateTime(timezone=True), nullable=True
     )
-    paper_order_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    paper_order_at: Mapped[datetime | None] = mapped_column(UTCDateTime(timezone=True), nullable=True)
     news_decision_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     provider_metadata: Mapped[dict[str, object]] = mapped_column(JSONType, default=dict)
@@ -153,7 +153,7 @@ class NewsSymbolLinkRow(Base):
     # Part of the key so provenance survives: an item can be linked to a symbol by
     # both the publisher and the AI without one overwriting the other.
     link_type: Mapped[str] = mapped_column(String(40), primary_key=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(timezone=True), nullable=False)
 
     __table_args__ = (Index("ix_news_symbol_links_symbol", "symbol"),)
 

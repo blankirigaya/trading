@@ -14,7 +14,10 @@ import type {
   PortfolioState,
   SystemStatus,
   TimelineEvent,
+  TradeHistoryResponse,
   TradeRow,
+  TradingBot,
+  UniverseMode,
   Candle,
 } from './types'
 import type {
@@ -72,10 +75,15 @@ export const api = {
   decision: (id: string) => request<DecisionRecord>(`/decisions/${encodeURIComponent(id)}`),
 
   trades: () => request<TradeRow[]>('/trades'),
+
+  tradeHistory: () => request<TradeHistoryResponse>('/trades/history'),
   trade: (id: string) => request<TradeRow>(`/trades/${encodeURIComponent(id)}`),
 
   events: (limit = 200) => request<TimelineEvent[]>(`/events/recent?limit=${limit}`),
   performance: () => request<PerformanceSummary>('/performance'),
+
+  // One entry per AI reviewer shard: its symbols, paper book, and recent decisions.
+  bots: () => request<TradingBot[]>('/bots'),
 
   // News is read-only here. The UI never polls or analyses news itself.
   news: (limit = 100) => request<NewsRow[]>(`/news?limit=${limit}`),
@@ -93,5 +101,38 @@ export const api = {
     postWith<{ kill_switch_state: boolean; live_order_execution: boolean }>('/control/kill-switch', {
       enabled: String(enabled),
     }),
+  // Persisted universe switch; the backend applies it at the next review cycle.
+  setUniverseMode: (mode: UniverseMode) =>
+    postWith<{ universe_mode: UniverseMode; applies: string }>('/control/universe', {
+      mode,
+    }),
+  // Persisted override of the fixed AI money caps; applied immediately.
+  setCapitalCap: (disabled: boolean) =>
+    postWith<{ capital_cap_disabled: boolean; live_order_execution: boolean }>(
+      '/control/capital-cap',
+      { disabled: String(disabled) },
+    ),
+  // Persisted override of the max-open-positions cap; applied immediately.
+  setPositionCap: (disabled: boolean) =>
+    postWith<{ position_count_cap_disabled: boolean; live_order_execution: boolean }>(
+      '/control/position-cap',
+      { disabled: String(disabled) },
+    ),
+  // News kill switches; applied immediately, no restart.
+  setTier1News: (enabled: boolean) =>
+    postWith<{ tier1_news_enabled: boolean; live_order_execution: boolean }>(
+      '/control/tier1-news',
+      { enabled: String(enabled) },
+    ),
+  setNewsAnalysis: (enabled: boolean) =>
+    postWith<{ news_analysis_enabled: boolean; live_order_execution: boolean }>(
+      '/control/news-analysis',
+      { enabled: String(enabled) },
+    ),
+  setSonnetEscalation: (enabled: boolean) =>
+    postWith<{ sonnet_escalation_enabled: boolean; live_order_execution: boolean }>(
+      '/control/sonnet-escalation',
+      { enabled: String(enabled) },
+    ),
   resetPaper: () => post<{ status: string; execution_provider: string }>('/paper/reset'),
 }

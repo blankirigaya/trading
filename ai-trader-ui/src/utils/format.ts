@@ -11,9 +11,21 @@ const inrFormatter = new Intl.NumberFormat('en-IN', {
   maximumFractionDigits: 2,
 })
 
+const usdFormatter = new Intl.NumberFormat('en-US', {
+  style: 'currency',
+  currency: 'USD',
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 6,
+})
+
 const compactFormatter = new Intl.NumberFormat('en-IN', {
   minimumFractionDigits: 0,
   maximumFractionDigits: 0,
+})
+
+const tokenFormatter = new Intl.NumberFormat('en', {
+  notation: 'compact',
+  maximumFractionDigits: 1,
 })
 
 const priceFormatter = new Intl.NumberFormat('en-IN', {
@@ -40,7 +52,16 @@ export function formatInteger(value: string | number | null | undefined): string
 }
 
 export function formatQuantity(value: number | null | undefined): string {
-  return compactFormatter.format(value ?? 0)
+  return compactFormatter.format(toNumber(value))
+}
+
+export function formatTokens(value: number | null | undefined): string {
+  return tokenFormatter.format(toNumber(value))
+}
+
+export function formatUsd(value: number | null | undefined): string {
+  if (value === null || value === undefined) return 'n/a'
+  return usdFormatter.format(value)
 }
 
 export function formatPercent(fraction: number | null | undefined, digits = 1): string {
@@ -68,18 +89,26 @@ export function formatLatency(ms: number | null | undefined): string {
   return ms >= 1000 ? `${(ms / 1000).toFixed(2)} s` : `${ms} ms`
 }
 
+/** All timestamps are exchange time (Asia/Kolkata), regardless of browser locale. */
+const IST = 'Asia/Kolkata'
+
+function asUtc(iso: string): string {
+  // Backend timestamps are UTC wall time; a missing offset means UTC, not local.
+  return /([+-]\d{2}:?\d{2}|[zZ])$/.test(iso) ? iso : `${iso}Z`
+}
+
 export function formatTime(iso: string | null | undefined): string {
   if (!iso) return 'n/a'
-  const date = new Date(iso)
+  const date = new Date(asUtc(iso))
   if (Number.isNaN(date.getTime())) return 'n/a'
-  return date.toLocaleTimeString('en-GB', { hour12: false })
+  return date.toLocaleTimeString('en-GB', { hour12: false, timeZone: IST })
 }
 
 export function formatDateTime(iso: string | null | undefined): string {
   if (!iso) return 'n/a'
-  const date = new Date(iso)
+  const date = new Date(asUtc(iso))
   if (Number.isNaN(date.getTime())) return 'n/a'
-  return `${date.toLocaleDateString('en-GB')} ${date.toLocaleTimeString('en-GB', { hour12: false })}`
+  return `${date.toLocaleDateString('en-GB', { timeZone: IST })} ${date.toLocaleTimeString('en-GB', { hour12: false, timeZone: IST })}`
 }
 
 export function formatDuration(seconds: number | null | undefined): string {
