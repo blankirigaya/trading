@@ -15,6 +15,8 @@ import {
   dailyPerformance,
   decisionConversion,
   dedupeClosedTrades,
+  edgeStatistics,
+  excursionStats,
   holdingDurations,
   maxDrawdown,
   realizedEquityPoints,
@@ -159,6 +161,8 @@ export function Analytics() {
   }, [closedAll, cutoff, symbol, outcome, tradeSort, tradeDir])
 
   const summary = useMemo(() => summarizeTrades(closed), [closed])
+  const edge = useMemo(() => edgeStatistics(closed), [closed])
+  const excursions = useMemo(() => excursionStats(closed), [closed])
   const charges = useMemo(
     () => closed.reduce((s, t) => s + toNumber(t.charges), 0),
     [closed],
@@ -486,6 +490,89 @@ export function Analytics() {
           value={summary.expectancy === null ? '—' : formatSignedInr(summary.expectancy)}
           tone={(summary.expectancy ?? 0) < 0 ? 'neg' : 'pos'}
         />
+      </div>
+
+      <div className="card" data-testid="edge-quality">
+        <div className="card-title">
+          <span>Edge quality</span>
+          <span className="faint">{edge.n} completed trades</span>
+        </div>
+        {edge.mean === null ? (
+          <div className="faint">Insufficient historical data. No completed trades yet.</div>
+        ) : (
+          <>
+            <div className="stat-grid">
+              <StatCard
+                label="Mean P&L / trade"
+                value={formatSignedInr(edge.mean)}
+                tone={edge.mean < 0 ? 'neg' : 'pos'}
+              />
+              <StatCard
+                label="95% interval"
+                value={
+                  edge.ci95Low === null || edge.ci95High === null
+                    ? '—'
+                    : `${formatSignedInr(edge.ci95Low)} … ${formatSignedInr(edge.ci95High)}`
+                }
+              />
+              <StatCard
+                label="t-statistic"
+                value={edge.tStatistic === null ? '—' : edge.tStatistic.toFixed(2)}
+              />
+              <StatCard
+                label="Trades for significance"
+                value={edge.requiredSampleSize === null ? '—' : String(edge.requiredSampleSize)}
+              />
+            </div>
+            <div
+              className={
+                edge.significantlyPositive ? 'pos' : edge.significantlyNegative ? 'neg' : 'faint'
+              }
+              data-testid="edge-verdict"
+            >
+              {edge.significantlyPositive
+                ? 'The whole 95% interval is above zero: the edge is statistically positive at this sample size.'
+                : edge.significantlyNegative
+                  ? 'The whole 95% interval is below zero: this strategy is losing money beyond chance.'
+                  : 'Not yet distinguishable from zero. The result could be luck; do not size up on it.'}
+            </div>
+          </>
+        )}
+      </div>
+
+      <div className="card" data-testid="excursions">
+        <div className="card-title">
+          <span>Excursions &amp; give-back</span>
+          <span className="faint">{excursions.n} measured trades</span>
+        </div>
+        {excursions.n === 0 ? (
+          <div className="faint">
+            Insufficient historical data. Best/worst unrealized P&amp;L starts recording on trades
+            opened after this release.
+          </div>
+        ) : (
+          <>
+            <div className="stat-grid">
+              <StatCard
+                label="Avg best unrealized (MFE)"
+                value={formatSignedInr(excursions.avgMfe ?? 0)}
+                tone="pos"
+              />
+              <StatCard label="Median MFE" value={formatSignedInr(excursions.medianMfe ?? 0)} />
+              <StatCard
+                label="Avg worst unrealized (MAE)"
+                value={formatSignedInr(excursions.avgMae ?? 0)}
+                tone="neg"
+              />
+              <StatCard label="Profit given back" value={fmtPct(excursions.giveBackPct)} />
+            </div>
+            <div className="faint">
+              {excursions.gaveBackAll} trade(s) were profitable at some point and closed at or
+              below zero. A high give-back percentage means exits are too late; a low MFE means the
+              problem is the entry, not the exit.
+            </div>
+          </>
+        )}
       </div>
 
       <div className="stat-grid">

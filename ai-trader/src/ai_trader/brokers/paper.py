@@ -60,6 +60,11 @@ class PaperBroker(Broker):
         # (and reloading it from the close history) is what lets the portfolio
         # keep reporting P&L after a round trip.
         self.realized_pnl = Decimal("0")
+        # Best/worst marks per open symbol since entry, for MFE/MAE. In memory
+        # only: a restart re-seeds from the first live mark, which can only
+        # understate the excursion, never invent one.
+        self._peaks: dict[str, Decimal] = {}
+        self._troughs: dict[str, Decimal] = {}
 
     async def restore(self) -> None:
         """Reload the persisted open book (cash + positions) after a restart.
@@ -77,8 +82,19 @@ class PaperBroker(Broker):
         self._order_sequence = await self.ledger.fill_count(self.shard)
 
     def set_price(self, symbol: str, price: Decimal) -> None:
-        """Set the reference price used for fills and mark-to-market."""
+        """Set the reference price used for fills and mark-to-market.
+
+        Also records the best and worst price seen while a position is open, so
+        a closed trade can report how much unrealized profit it gave back.
+        """
         self.prices[symbol] = price
+        position = self.positions.get(symbol)
+        if position is None or position.quantity <= 0 or price <= 0:
+            return
+        peak = self._peaks.get(symbol)
+        trough = self._troughs.get(symbol)
+        self._peaks[symbol] = price if peak is None else max(peak, price)
+        self._troughs[symbol] = price if trough is None else min(trough, price)
 
     def mark_to_market(self, prices: dict[str, Decimal]) -> None:
         """Update paper prices from real market data and return the new valuation."""
@@ -257,6 +273,16 @@ class PaperBroker(Broker):
             self.entry_charges[request.symbol] = (
                 self.entry_charges.get(request.symbol, Decimal("0")) + fees
             )
+            if old.quantity <= 0:
+                self._peaks[request.symbol] = price
+                self._troughs[request.symbol] = price
+            else:
+                self._peaks[request.symbol] = max(
+                    self._peaks.get(request.symbol, price), price
+                )
+                self._troughs[request.symbol] = min(
+                    self._troughs.get(request.symbol, price), price
+                )
         else:
             if request.quantity > old.quantity:
                 raise ValueError("paper broker does not support short selling")
@@ -325,6 +351,13 @@ class PaperBroker(Broker):
             # Net of both legs: the entry charges already left cash on the buy,
             # so they are part of this round trip's realized result.
             pnl = (fill.price - entry_price) * fill.quantity - fill.fees - fill.entry_fees
+            # Best/worst unrealized P&L over the holding period, gross of
+            # charges: the gap from max_unrealized to realized_pnl is what was
+            # given back by exiting late.
+            peak = self._peaks.get(fill.symbol, fill.price)
+            trough = self._troughs.get(fill.symbol, fill.price)
+            max_unrealized = (peak - entry_price) * fill.quantity
+            min_unrealized = (trough - entry_price) * fill.quantity
             await ledger.save_book(
                 self.shard,
                 self.cash,
@@ -346,8 +379,14 @@ class PaperBroker(Broker):
                     entry_decision_id=entry_decision_id,
                     exit_decision_id=request.decision_id,
                     charges=fill.fees + fill.entry_fees,
+                    max_unrealized=max_unrealized,
+                    min_unrealized=min_unrealized,
                 )
             )
+            position_after = self.positions.get(fill.symbol)
+            if position_after is None or position_after.quantity <= 0:
+                self._peaks.pop(fill.symbol, None)
+                self._troughs.pop(fill.symbol, None)
 
     def _state(self) -> PortfolioState:
         positions = [position for position in self.positions.values() if position.quantity]

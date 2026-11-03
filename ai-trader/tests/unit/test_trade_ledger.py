@@ -110,6 +110,40 @@ async def test_sell_records_closed_trade_with_pnl(tmp_path) -> None:
     assert (await fresh.get_account()).realized_pnl == Decimal("100")
 
 
+async def test_closed_trade_records_best_and_worst_unrealized(tmp_path) -> None:
+    """MFE/MAE: the path matters, not just the exit price."""
+    broker, engine = _broker(tmp_path)
+    broker.set_price("INFY", Decimal("100"))
+    await broker.place_order(_request("INFY", OrderSide.BUY, 10, "d1"))
+
+    # Price runs to 115, falls to 96, then we exit at 103.
+    for price in ("115", "96", "103"):
+        broker.set_price("INFY", Decimal(price))
+    await broker.place_order(_request("INFY", OrderSide.SELL, 10, "d2"))
+
+    trade = (await TradeLedger(engine).closed_trades())[0]
+    assert trade.entry_price == Decimal("100")
+    assert trade.exit_price == Decimal("103")
+    # Best excursion +150, worst -40, realized before charges +30.
+    assert trade.max_unrealized == Decimal("150.00")
+    assert trade.min_unrealized == Decimal("-40.00")
+    assert trade.realized_pnl == Decimal("30")
+
+    # A closed position must not leak its extremes into the next round trip.
+    broker.set_price("INFY", Decimal("100"))
+    await broker.place_order(
+        _request("INFY", OrderSide.BUY, 10, "d3").model_copy(update={"client_order_id": "b2"})
+    )
+    broker.set_price("INFY", Decimal("102"))
+    await broker.place_order(
+        _request("INFY", OrderSide.SELL, 10, "d4").model_copy(update={"client_order_id": "s2"})
+    )
+    trades = await TradeLedger(engine).closed_trades()
+    latest = next(item for item in trades if item.exit_decision_id == "d4")
+    assert latest.max_unrealized == Decimal("20.00")
+    assert latest.min_unrealized == Decimal("0.00")
+
+
 async def test_reset_keeps_history_but_forgets_open_book(tmp_path) -> None:
     broker, engine = _broker(tmp_path)
     broker.set_price("INFY", Decimal("100"))

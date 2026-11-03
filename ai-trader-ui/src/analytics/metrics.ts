@@ -148,6 +148,194 @@ export function summarizeTrades(trades: ClosedTradeRow[]): TradeSummary {
   }
 }
 
+/**
+ * Is the observed edge distinguishable from luck?
+ *
+ * With a handful of trades almost any expectancy looks impressive or terrible
+ * by accident. This computes the standard error of the per-trade mean and a
+ * two-sided 95% interval, so the UI can say "not yet distinguishable from zero"
+ * instead of implying statistical proof.
+ */
+export interface EdgeStatistics {
+  n: number
+  /** Mean net P&L per completed trade. */
+  mean: number | null
+  /** Sample standard deviation of per-trade P&L. */
+  stdDev: number | null
+  standardError: number | null
+  /** mean / standardError; null when n < 2 or SE is zero. */
+  tStatistic: number | null
+  ci95Low: number | null
+  ci95High: number | null
+  /** True only when the whole 95% interval is above zero. */
+  significantlyPositive: boolean | null
+  /** True only when the whole 95% interval is below zero. */
+  significantlyNegative: boolean | null
+  /** Trades needed for the observed mean to clear zero at 95%; null when no mean. */
+  requiredSampleSize: number | null
+}
+
+/** Two-sided 95% critical values; falls back to 1.96 beyond 30 degrees of freedom. */
+const T_CRITICAL_95: Record<number, number> = {
+  1: 12.706,
+  2: 4.303,
+  3: 3.182,
+  4: 2.776,
+  5: 2.571,
+  6: 2.447,
+  7: 2.365,
+  8: 2.306,
+  9: 2.262,
+  10: 2.228,
+  15: 2.131,
+  20: 2.086,
+  25: 2.06,
+  30: 2.042,
+}
+
+function tCritical(df: number): number {
+  const direct = T_CRITICAL_95[df]
+  if (direct !== undefined) return direct
+  const keys = Object.keys(T_CRITICAL_95)
+    .map(Number)
+    .sort((a, b) => a - b)
+  for (const key of keys) {
+    if (df <= key) return T_CRITICAL_95[key] ?? 1.96
+  }
+  return 1.96
+}
+
+export function edgeStatistics(trades: ClosedTradeRow[]): EdgeStatistics {
+  const n = trades.length
+  const empty: EdgeStatistics = {
+    n,
+    mean: null,
+    stdDev: null,
+    standardError: null,
+    tStatistic: null,
+    ci95Low: null,
+    ci95High: null,
+    significantlyPositive: null,
+    significantlyNegative: null,
+    requiredSampleSize: null,
+  }
+  if (n === 0) return empty
+
+  const values = trades.map((trade) => toNumber(trade.realized_pnl))
+  const mean = values.reduce((sum, value) => sum + value, 0) / n
+  if (n < 2) return { ...empty, mean }
+
+  const variance =
+    values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (n - 1)
+  const stdDev = Math.sqrt(variance)
+  const standardError = stdDev / Math.sqrt(n)
+  if (standardError === 0) {
+    // Every trade identical: the interval collapses onto the mean.
+    return {
+      ...empty,
+      mean,
+      stdDev,
+      standardError,
+      tStatistic: null,
+      ci95Low: mean,
+      ci95High: mean,
+      significantlyPositive: mean > 0,
+      significantlyNegative: mean < 0,
+      requiredSampleSize: null,
+    }
+  }
+
+  const critical = tCritical(n - 1)
+  const halfWidth = critical * standardError
+  const ci95Low = mean - halfWidth
+  const ci95High = mean + halfWidth
+  return {
+    n,
+    mean,
+    stdDev,
+    standardError,
+    tStatistic: mean / standardError,
+    ci95Low,
+    ci95High,
+    significantlyPositive: ci95Low > 0,
+    significantlyNegative: ci95High < 0,
+    // Trades needed for the current effect size to clear zero at 95%.
+    requiredSampleSize:
+      mean === 0 ? null : Math.ceil(((critical * stdDev) / Math.abs(mean)) ** 2),
+  }
+}
+
+/**
+ * Excursion statistics: how much unrealized profit positions reached, and how
+ * much of it was given back before the exit.
+ *
+ * This is the honest answer to "are we exiting too late?". Only trades with a
+ * recorded max_unrealized are counted; rows from before excursion tracking are
+ * excluded rather than treated as flat.
+ */
+export interface ExcursionStats {
+  /** Trades carrying excursion data. */
+  n: number
+  avgMfe: number | null
+  medianMfe: number | null
+  avgMae: number | null
+  /** Sum of (max_unrealized − gross_pnl) across trades that ever went positive. */
+  totalGivenBack: number | null
+  /** Percentage of peak unrealized profit that was not realised. */
+  giveBackPct: number | null
+  /** Trades that were in profit at some point but closed at or below zero. */
+  gaveBackAll: number
+}
+
+export function excursionStats(trades: ClosedTradeRow[]): ExcursionStats {
+  const measured = trades.filter(
+    (trade) => trade.max_unrealized !== null && trade.max_unrealized !== undefined,
+  )
+  if (measured.length === 0) {
+    return {
+      n: 0,
+      avgMfe: null,
+      medianMfe: null,
+      avgMae: null,
+      totalGivenBack: null,
+      giveBackPct: null,
+      gaveBackAll: 0,
+    }
+  }
+
+  const mfes = measured.map((trade) => toNumber(trade.max_unrealized))
+  const maes = measured.map((trade) => toNumber(trade.min_unrealized ?? 0))
+  const sortedMfe = [...mfes].sort((a, b) => a - b)
+  const mid = Math.floor(sortedMfe.length / 2)
+  const medianMfe =
+    sortedMfe.length % 2 === 0
+      ? ((sortedMfe[mid - 1] ?? 0) + (sortedMfe[mid] ?? 0)) / 2
+      : (sortedMfe[mid] ?? 0)
+
+  let peakProfit = 0
+  let givenBack = 0
+  let gaveBackAll = 0
+  measured.forEach((trade, index) => {
+    const mfe = mfes[index] ?? 0
+    const gross = toNumber(trade.gross_pnl)
+    if (mfe <= 0) return
+    peakProfit += mfe
+    const shortfall = mfe - gross
+    if (shortfall > 0) givenBack += shortfall
+    if (gross <= 0) gaveBackAll += 1
+  })
+
+  return {
+    n: measured.length,
+    avgMfe: mfes.reduce((sum, value) => sum + value, 0) / measured.length,
+    medianMfe,
+    avgMae: maes.reduce((sum, value) => sum + value, 0) / measured.length,
+    totalGivenBack: peakProfit > 0 ? givenBack : null,
+    giveBackPct: peakProfit > 0 ? (givenBack / peakProfit) * 100 : null,
+    gaveBackAll,
+  }
+}
+
 export interface DrawdownResult {
   /** Largest peak-to-trough decline in rupees (positive number). */
   amount: number
@@ -155,8 +343,7 @@ export interface DrawdownResult {
   percent: number | null
   /** Peak equity value before the worst trough. */
   peak: number
-  trough: number
-}
+  trough: number}
 
 /**
  * Maximum drawdown over a chronological equity series.

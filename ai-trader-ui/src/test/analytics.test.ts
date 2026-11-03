@@ -6,6 +6,8 @@ import {
   dailyPerformance,
   decisionConversion,
   dedupeClosedTrades,
+  edgeStatistics,
+  excursionStats,
   holdingDurations,
   maxDrawdown,
   currentDrawdown,
@@ -423,5 +425,83 @@ describe('streaks', () => {
     const result = streaks(trades)
     expect(result.maxWinStreak).toBe(1)
     expect(result.currentStreak).toBe(1)
+  })
+})
+
+describe('edgeStatistics', () => {
+  it('reports impossible-to-call results as not significant', () => {
+    // Mean is positive but the spread is large: classic small-sample noise.
+    const trades = [
+      trade({ realized_pnl: '100' }),
+      trade({ realized_pnl: '-90' }),
+      trade({ realized_pnl: '80' }),
+      trade({ realized_pnl: '-70' }),
+    ]
+    const stats = edgeStatistics(trades)
+    expect(stats.n).toBe(4)
+    expect(stats.mean).toBeCloseTo(5, 5)
+    expect(stats.significantlyPositive).toBe(false)
+    expect(stats.significantlyNegative).toBe(false)
+    expect(stats.ci95Low).toBeLessThan(0)
+    expect(stats.ci95High).toBeGreaterThan(0)
+  })
+
+  it('flags a consistently positive series as significant', () => {
+    const trades = [
+      trade({ realized_pnl: '21' }),
+      trade({ realized_pnl: '19' }),
+      trade({ realized_pnl: '20' }),
+      trade({ realized_pnl: '22' }),
+      trade({ realized_pnl: '18' }),
+    ]
+    const stats = edgeStatistics(trades)
+    expect(stats.significantlyPositive).toBe(true)
+    expect(stats.ci95Low).toBeGreaterThan(0)
+    expect(stats.requiredSampleSize).toBeLessThanOrEqual(5)
+  })
+
+  it('returns nulls rather than zeros with no trades', () => {
+    const stats = edgeStatistics([])
+    expect(stats.mean).toBeNull()
+    expect(stats.ci95Low).toBeNull()
+    expect(stats.significantlyPositive).toBeNull()
+  })
+})
+
+describe('excursionStats', () => {
+  it('ignores trades recorded before excursions were measured', () => {
+    const trades = [
+      trade({ max_unrealized: null, min_unrealized: null }),
+      trade({ max_unrealized: '50', min_unrealized: '-10', gross_pnl: '30' }),
+    ]
+    const stats = excursionStats(trades)
+    expect(stats.n).toBe(1)
+    expect(stats.avgMfe).toBe(50)
+  })
+
+  it('measures profit given back before the exit', () => {
+    // Peaked at +100 but booked +40: 60 given back of 150 total peak profit
+    // (second trade peaked at +50, booked all 50).
+    const trades = [
+      trade({ max_unrealized: '100', min_unrealized: '-20', gross_pnl: '40' }),
+      trade({ max_unrealized: '50', min_unrealized: '0', gross_pnl: '50' }),
+    ]
+    const stats = excursionStats(trades)
+    expect(stats.avgMfe).toBe(75)
+    expect(stats.medianMfe).toBe(75)
+    expect(stats.totalGivenBack).toBe(60)
+    expect(stats.giveBackPct).toBeCloseTo((60 / 150) * 100, 5)
+  })
+
+  it('counts trades that gave back the entire profit', () => {
+    const trades = [trade({ max_unrealized: '80', min_unrealized: '-5', gross_pnl: '-2' })]
+    const stats = excursionStats(trades)
+    expect(stats.gaveBackAll).toBe(1)
+  })
+
+  it('reports no data instead of zero when nothing was measured', () => {
+    const stats = excursionStats([trade({ max_unrealized: null })])
+    expect(stats.n).toBe(0)
+    expect(stats.giveBackPct).toBeNull()
   })
 })

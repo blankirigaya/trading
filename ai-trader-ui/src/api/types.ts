@@ -293,6 +293,10 @@ export interface ClosedTradeRow {
   charges: string
   /** Realized P&L before charges. */
   gross_pnl: string
+  /** Best unrealized P&L reached while open; null when not measured. */
+  max_unrealized?: string | null
+  /** Worst unrealized P&L reached while open; null when not measured. */
+  min_unrealized?: string | null
   opened_at: string | null
   closed_at: string
   entry_decision_id: string | null

@@ -74,6 +74,13 @@ class ClosedTradeRow(Base):
     # Total charges for the round trip (entry + exit legs). Gross P&L is
     # realized_pnl + charges. Zero on trades recorded before charges existed.
     charges: Mapped[Decimal] = mapped_column(Numeric(18, 4), server_default="0")
+    # Best and worst unrealized rupee P&L reached while the position was open,
+    # sampled from live marks. They show whether an exit was early or late:
+    # a large max_unrealized with a small realized_pnl is give-back. NULL on
+    # trades recorded before excursions were measured (never zero-filled, so
+    # "unmeasured" stays distinguishable from "never moved").
+    max_unrealized: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
+    min_unrealized: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
     opened_at: Mapped[datetime | None] = mapped_column(UTCDateTime(timezone=True), nullable=True)
     closed_at: Mapped[datetime] = mapped_column(UTCDateTime(timezone=True), index=True)
     entry_decision_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -116,6 +123,8 @@ _ADDED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("paper_fills", "gst"),
     ("paper_positions", "entry_charges"),
     ("paper_closed_trades", "charges"),
+    ("paper_closed_trades", "max_unrealized"),
+    ("paper_closed_trades", "min_unrealized"),
 )
 
 

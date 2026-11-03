@@ -473,6 +473,12 @@ async def trades_history(request: Request, limit: int = 300) -> dict[str, object
                 "realized_pnl": str(trade.realized_pnl),
                 "charges": str(trade.charges),
                 "gross_pnl": str(trade.realized_pnl + trade.charges),
+                "max_unrealized": str(trade.max_unrealized)
+                if trade.max_unrealized is not None
+                else None,
+                "min_unrealized": str(trade.min_unrealized)
+                if trade.min_unrealized is not None
+                else None,
                 "opened_at": trade.opened_at.isoformat() if trade.opened_at else None,
                 "closed_at": trade.closed_at.isoformat(),
                 "entry_decision_id": trade.entry_decision_id,

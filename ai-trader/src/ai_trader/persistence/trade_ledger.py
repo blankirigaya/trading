@@ -44,6 +44,10 @@ class ClosedTrade:
     exit_decision_id: str
     # Total charges for the round trip (entry + exit). Gross = realized + charges.
     charges: Decimal = Decimal("0")
+    # Best and worst unrealized P&L while the position was open. None on trades
+    # recorded before these were measured.
+    max_unrealized: Decimal | None = None
+    min_unrealized: Decimal | None = None
 
 
 def _to_closed_trade(row: ClosedTradeRow) -> ClosedTrade:
@@ -60,6 +64,8 @@ def _to_closed_trade(row: ClosedTradeRow) -> ClosedTrade:
         entry_decision_id=row.entry_decision_id,
         exit_decision_id=row.exit_decision_id,
         charges=row.charges or Decimal("0"),
+        max_unrealized=row.max_unrealized,
+        min_unrealized=row.min_unrealized,
     )
 
 
@@ -183,6 +189,8 @@ class TradeLedger:
                     exit_price=trade.exit_price,
                     realized_pnl=trade.realized_pnl,
                     charges=trade.charges,
+                    max_unrealized=trade.max_unrealized,
+                    min_unrealized=trade.min_unrealized,
                     opened_at=trade.opened_at,
                     closed_at=trade.closed_at,
                     entry_decision_id=trade.entry_decision_id,
