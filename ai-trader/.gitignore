@@ -1,5 +1,6 @@
 .env
 .venv/
+archives/
 __pycache__/
 .pytest_cache/
 .mypy_cache/
