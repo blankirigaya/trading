@@ -79,6 +79,21 @@ export interface Position {
   realized_pnl: string
 }
 
+/** Active paper charge schedule, served so the UI can estimate exit costs with
+ * the exact rates the broker books — never a hardcoded copy that can drift. */
+export interface ChargeSchedule {
+  enabled: boolean
+  rates: {
+    brokerage_pct: string
+    brokerage_cap_inr: string
+    stt_sell_pct: string
+    exchange_pct: string
+    sebi_pct: string
+    stamp_duty_buy_pct: string
+    gst_pct: string
+  } | null
+}
+
 export interface PortfolioState {
   cash: string
   reserved_cash: string

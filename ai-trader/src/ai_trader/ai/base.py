@@ -14,6 +14,15 @@ class AIProvider(ABC):
     def model_name(self) -> str:
         """Model identifier reported by the configured inference service."""
 
+    @property
+    def provider_label(self) -> str:
+        """Stable provider name for provenance; never a credential-bearing value.
+
+        Used when a decision fails before the provider can return its own
+        metadata, so a failure record still names the transport that failed.
+        """
+        return type(self).__name__
+
     @abstractmethod
     async def structured_completion(
         self,

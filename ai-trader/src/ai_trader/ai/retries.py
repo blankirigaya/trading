@@ -23,6 +23,10 @@ class RetryingAIProvider(AIProvider):
     def model_name(self) -> str:
         return self.provider.model_name
 
+    @property
+    def provider_label(self) -> str:
+        return self.provider.provider_label
+
     async def structured_completion(
         self,
         system_prompt: str,
@@ -33,6 +37,7 @@ class RetryingAIProvider(AIProvider):
         prompt_version: str,
     ) -> tuple[T, ProviderMetadata]:
         prompt = user_prompt
+        detail = ""
         for attempt in range(self.max_retries + 1):
             try:
                 result, metadata = await self.provider.structured_completion(
@@ -43,13 +48,20 @@ class RetryingAIProvider(AIProvider):
                     prompt_version=prompt_version,
                 )
             except (ValueError, KeyError, TypeError) as exc:
+                detail = getattr(exc, "detail", "") or str(exc)
                 if attempt == self.max_retries:
                     raise StructuredCompletionFailed(
-                        "AI response failed schema validation"
+                        f"AI response failed schema validation: {detail}"
+                        if detail
+                        else "AI response failed schema validation"
                     ) from exc
+                # Name the broken field: a generic "try again" invites the same
+                # mistake, while a field-level correction usually fixes it on the
+                # first retry. The detail is bounded by SchemaValidationError.
                 prompt = (
-                    f"{user_prompt}\nYour prior output failed schema validation. "
-                    "Return only valid JSON for the requested schema."
+                    f"{user_prompt}\nYour prior output failed schema validation"
+                    + (f": {detail}" if detail else "")
+                    + ". Return only valid JSON for the requested schema."
                 )
                 continue
             updated = metadata.model_copy(

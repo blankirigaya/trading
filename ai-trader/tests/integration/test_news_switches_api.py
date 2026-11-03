@@ -12,7 +12,15 @@ from ai_trader.config import Settings
 
 def _client(database_path: Path) -> TestClient:
     app = FastAPI()
-    app.state.container = Container(Settings(database_url=f"sqlite:///{database_path}"))
+    # Explicit switch values: operator .env must never leak into what should
+    # be a hermetic exposure/persistence test of the control store itself.
+    app.state.container = Container(
+        Settings(
+            database_url=f"sqlite:///{database_path}",
+            news_analysis_enabled=True,
+            ai_max_sonnet_escalations_per_day=20,
+        )
+    )
     app.include_router(router)
     return TestClient(app)
 

@@ -18,6 +18,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from ai_trader.ai.base import AIProvider
+from ai_trader.ai.entry_plan import EntryPlanRequired
 from ai_trader.ai.jev import build_critic
 from ai_trader.ai.portfolio_manager import PortfolioManagerAgent, position_limits_text
 from ai_trader.ai.providers import build_ai_provider
@@ -380,7 +381,10 @@ class ShadowSession:
                         f"NSE:{position.symbol.upper()}-EQ"
                     )
         held = [symbol for symbols in held_by_shard.values() for symbol in symbols]
-        subscribed = list(dict.fromkeys([*selected, *held]))
+        # Held positions go FIRST: subscribe_symbols trims to the FYERS
+        # 100-topic cap, and an open position must never be the thing trimmed
+        # off the live feed (it still has to be closable at a real price).
+        subscribed = list(dict.fromkeys([*held, *selected]))
         groups = self._assign_shard_symbols(subscribed, held_by_shard)
         self.universe_selected = tuple(selected)
         if groups == [list(shard.symbols) for shard in self.shards]:
@@ -860,10 +864,12 @@ def build_session(
             broker.set_price(state.instrument.symbol, state.last_price)
         remote_provider = build_ai_provider(settings, health, cadence=True)
         providers.append(remote_provider)
-        provider = RetryingAIProvider(remote_provider, settings.ai_schema_max_retries)
+        provider = RetryingAIProvider(
+            EntryPlanRequired(remote_provider), settings.ai_schema_max_retries
+        )
         manager = PortfolioManagerAgent(
             provider,
-            "v11",
+            "v13",
             position_limits=position_limits_text(
                 settings,
                 capital_cap_disabled=capital_cap_disabled,
@@ -888,6 +894,9 @@ def build_session(
             active_clock,
             event_sink=event_sink,
             latency_sink=_latency_sink(news_repository) if settings.news_enabled else None,
+            jev_min_entry_score=settings.jev_min_entry_score,
+            charge_rates=charge_rates_for(settings),
+            min_edge_cost_multiple=settings.min_edge_cost_multiple,
         )
         # Sonnet twin of the shard workflow for news-triggered escalation:
         # same book, safety, execution and journal, only the manager's model
@@ -897,8 +906,10 @@ def build_session(
         providers.append(sonnet_provider)
         sonnet_workflow = ShadowReviewWorkflow(
             PortfolioManagerAgent(
-                RetryingAIProvider(sonnet_provider, settings.ai_schema_max_retries),
-                "v11",
+                RetryingAIProvider(
+                    EntryPlanRequired(sonnet_provider), settings.ai_schema_max_retries
+                ),
+                "v13",
                 position_limits=position_limits_text(
                     settings,
                     capital_cap_disabled=capital_cap_disabled,
@@ -913,6 +924,9 @@ def build_session(
             active_clock,
             event_sink=event_sink,
             latency_sink=_latency_sink(news_repository) if settings.news_enabled else None,
+            jev_min_entry_score=settings.jev_min_entry_score,
+            charge_rates=charge_rates_for(settings),
+            min_edge_cost_multiple=settings.min_edge_cost_multiple,
         )
         shards.append(
             ReviewShard(

@@ -7,6 +7,8 @@
  */
 
 import type {
+  Candle,
+  ChargeSchedule,
   DecisionRecord,
   MarketSnapshot,
   MarketStatus,
@@ -18,7 +20,6 @@ import type {
   TradeRow,
   TradingBot,
   UniverseMode,
-  Candle,
 } from './types'
 import type {
   NewsLatencyResponse,
@@ -78,6 +79,9 @@ export const api = {
 
   tradeHistory: () => request<TradeHistoryResponse>('/trades/history'),
   trade: (id: string) => request<TradeRow>(`/trades/${encodeURIComponent(id)}`),
+
+  // Active paper charge schedule for exit-cost estimates. Read-only.
+  chargesSchedule: () => request<ChargeSchedule>('/charges/schedule'),
 
   events: (limit = 200) => request<TimelineEvent[]>(`/events/recent?limit=${limit}`),
   performance: () => request<PerformanceSummary>('/performance'),

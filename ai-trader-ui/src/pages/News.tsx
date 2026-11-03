@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 
 import type { NewsRow } from '@/api/newsTypes'
 import { Badge, Empty, StateBadge } from '@/components/common/Primitives'
+import { PageHeader } from '@/components/common/PageHeader'
 import { LiveNewsFeed, ProviderStatusStrip } from '@/components/news/LiveNews'
 import { NewsLatencyTable } from '@/components/news/NewsLatency'
 import { useNews, useNewsSources } from '@/hooks/useNews'
@@ -195,6 +196,11 @@ export function News() {
 
   return (
     <div>
+      <PageHeader
+        eyebrow="Overview"
+        title="News intelligence"
+        sub="Source material and AI interpretation, kept strictly separate."
+      />
       <ProviderStatusStrip />
       <LiveNewsFeed limit={30} />
       <NewsLatencyTable />
@@ -258,6 +264,7 @@ export function News() {
             No news yet. Run <code>uv run python -m ai_trader news poll --once</code> on the backend.
           </Empty>
         ) : (
+          <div className="table-scroll">
           <table>
             <thead>
               <tr>
@@ -297,6 +304,7 @@ export function News() {
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </div>
 

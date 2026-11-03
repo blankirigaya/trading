@@ -29,6 +29,13 @@ from ai_trader.integrations.fyers.market_data import FyersMarketDataService
 
 logger = logging.getLogger(__name__)
 
+# FYERS HSM data socket accepts at most 100 scrips per subscription.
+# Verified live 2026-11-02: 100 topics stream, 101 topics silence the ENTIRE
+# subscription (handshake still succeeds, so `connected` stays true and only
+# feed_idle_seconds reveals it). The universe is 100 symbols by itself, so any
+# held position appended on top pushes it over — trim, never exceed.
+MAX_SUBSCRIBE_TOPICS = 100
+
 
 @dataclass
 class FyersFeed:
@@ -68,12 +75,26 @@ class FyersFeed:
         The service already knows every resolved instrument, so the new topics
         decode without rebuilding it. ``reconnect`` drops the live session and
         lets ``run`` resubscribe; it is a no-op before the first connection.
+
+        The wanted set is trimmed to MAX_SUBSCRIBE_TOPICS (held positions must
+        come first in ``symbols`` so the trim never strands an open position
+        without live prices). Oversize requests are rejected wholesale by
+        FYERS, so exceeding the cap would silence the whole feed, not just the
+        extra symbols.
         """
         wanted: list[str] = []
         for symbol in symbols:
             topic = self.symbol_to_topic.get(symbol.upper())
             if topic is not None and topic not in wanted:
                 wanted.append(topic)
+        if len(wanted) > MAX_SUBSCRIBE_TOPICS:
+            logger.warning(
+                "feed subscription trimmed %d -> %d topics; "
+                "symbols beyond the cap get no live prices",
+                len(wanted),
+                MAX_SUBSCRIBE_TOPICS,
+            )
+            wanted = wanted[:MAX_SUBSCRIBE_TOPICS]
         if wanted == self.topics:
             return False
         self.topics = wanted

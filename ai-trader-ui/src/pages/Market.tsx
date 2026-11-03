@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 
 import { Badge, Empty } from '@/components/common/Primitives'
+import { PageHeader } from '@/components/common/PageHeader'
 import { PanelErrorBoundary } from '@/components/common/PanelErrorBoundary'
 import { PriceChart, useCandleData, type DecisionMarker } from '@/components/market/PriceChart'
 import { useDecisions } from '@/hooks/useDecisions'
@@ -65,6 +66,11 @@ export function Market() {
 
   return (
     <div>
+      <PageHeader
+        eyebrow="Overview"
+        title="Market"
+        sub="Real FYERS prices with backend AI decision markers."
+      />
       <div className="card">
         <div className="card-title">
           <span>Market data</span>
@@ -73,20 +79,23 @@ export function Market() {
           </Badge>
         </div>
         <div className="filter-bar">
-          {(snapshots ?? []).map((snapshot) => (
-            <button
-              key={snapshot.instrument.symbol}
-              type="button"
-              className={`btn${activeSymbol === snapshot.instrument.symbol ? ' primary' : ''}`}
-              onClick={() => setSelected(snapshot.instrument.symbol)}
-            >
-              {snapshot.instrument.symbol}
-            </button>
-          ))}
+          <div className="seg-group" role="group" aria-label="Select symbol">
+            {(snapshots ?? []).map((snapshot) => (
+              <button
+                key={snapshot.instrument.symbol}
+                type="button"
+                className={`btn${activeSymbol === snapshot.instrument.symbol ? ' primary' : ''}`}
+                onClick={() => setSelected(snapshot.instrument.symbol)}
+              >
+                {snapshot.instrument.symbol}
+              </button>
+            ))}
+          </div>
           {!snapshots?.length ? <span className="faint">Watching: {symbols.join(', ')}</span> : null}
         </div>
 
         {snapshots?.length ? (
+          <div className="table-scroll">
           <table>
             <thead>
               <tr>
@@ -131,6 +140,7 @@ export function Market() {
               })}
             </tbody>
           </table>
+          </div>
         ) : (
           <Empty>
             No market data yet. The UI never contacts FYERS directly; it waits for the backend feed.

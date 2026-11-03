@@ -1,7 +1,9 @@
 import httpx
 import pytest
 
+from ai_trader.ai.errors import SchemaValidationError
 from ai_trader.ai.remote_model import (
+    DEGRADED_AFTER_CONSECUTIVE_FAILURES,
     AIHealth,
     OpenAICompatibleAIProvider,
     RemoteAIUnavailable,
@@ -54,10 +56,20 @@ def test_health_records_success_and_failure() -> None:
     health.record_success()
     assert health.reachable is True
     assert health.last_success_at is not None
+    # A lone transient failure is dampened: the badge must not flap on one
+    # red review among hundreds of green ones.
     health.record_failure("boom")
-    assert health.reachable is False
+    assert health.reachable is True
     assert health.last_failure_at is not None
     assert health.last_error == "boom"
+    # ...but a sustained run with no success in between means genuinely down.
+    for _ in range(DEGRADED_AFTER_CONSECUTIVE_FAILURES - 1):
+        health.record_failure("boom")
+    assert health.reachable is False
+    # Any success recovers immediately.
+    health.record_success()
+    assert health.reachable is True
+    assert health.last_error is None
 
 
 async def test_pooled_client_is_reused_across_requests() -> None:
@@ -91,8 +103,11 @@ async def test_network_failure_marks_health_and_fails_closed() -> None:
         await provider.structured_completion(
             "s", "u", PortfolioDecision, prompt_name="t", prompt_version="v1"
         )
-    assert health.reachable is False
+    # Fail-closed is about raising, not the badge: one refused connection is
+    # dampened (a fresh object stays UNKNOWN, never flips straight to down),
+    # the error is still recorded for diagnostics.
     assert health.last_error is not None
+    assert health.reachable is None
     await provider.aclose()
 
 
@@ -105,8 +120,10 @@ async def test_http_error_marks_health_failure() -> None:
         await provider.structured_completion(
             "s", "u", PortfolioDecision, prompt_name="t", prompt_version="v1"
         )
-    assert health.reachable is False
+    # A single 503 is dampened (stays UNKNOWN on a fresh object, never
+    # straight to down); the error is recorded.
     assert "503" in (health.last_error or "")
+    assert health.reachable is None
     await provider.aclose()
 
 
@@ -148,9 +165,28 @@ async def test_successful_completion_records_provenance_without_secrets() -> Non
 
 
 def test_settings_remain_remote_oriented() -> None:
-    settings = Settings()
+    settings = Settings(ai_provider="remote_openai_compatible")
     assert settings.ai_provider == "remote_openai_compatible"
     assert settings.ai_base_url == ""
     assert settings.ai_timeout_seconds == 120
     assert settings.ai_max_concurrent_requests == 1
     assert settings.live_order_execution is False
+
+
+async def test_schema_failure_names_the_missing_field() -> None:
+    """A bare "invalid" is undiagnosable; the error must say which field broke."""
+    provider = OpenAICompatibleAIProvider("http://ai-node:8080/v1", "m", None, 5, 1)
+    # cash_percent is required by PortfolioDecision and deliberately absent.
+    content = '{"allocations":[],"proposals":[],"market_summary":"m","decision_summary":"d"}'
+    payload = {"choices": [{"message": {"content": content}}]}
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=payload))
+    provider._client = httpx.AsyncClient(transport=transport)
+
+    with pytest.raises(SchemaValidationError) as raised:
+        await provider.structured_completion(
+            "s", "u", PortfolioDecision, prompt_name="t", prompt_version="v1"
+        )
+
+    assert "cash_percent" in raised.value.detail
+    assert "cash_percent" in str(raised.value)
+    await provider.aclose()

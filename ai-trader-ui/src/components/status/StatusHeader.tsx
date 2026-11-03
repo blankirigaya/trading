@@ -76,10 +76,12 @@ export function StatusHeader({
   return (
     <header className="app-header">
       <div className="header-title">
-        <h1>AI TRADER</h1>
+        <h1>
+          AI TRADER <span className="ai-mark">/ TERMINAL</span>
+        </h1>
         <span data-testid="mode-label">{status ? status.mode : 'BACKEND OFFLINE'}</span>
       </div>
-      <div className="provider-strip">
+      <div className="provider-strip" role="status" aria-label="Connection status">
         <Chip label="Backend" state={backend} />
         <Chip
           label="Market"

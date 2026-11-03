@@ -6,9 +6,10 @@ from typing import TypeVar
 from urllib.parse import urlparse
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from ai_trader.ai.base import AIProvider
+from ai_trader.ai.errors import SchemaValidationError, summarize_validation_errors
 from ai_trader.domain.decisions import ProviderMetadata
 
 T = TypeVar("T", bound=BaseModel)
@@ -34,6 +35,13 @@ def sanitize_server_identifier(base_url: str) -> str:
     return f"{host}:{port}" if port else host
 
 
+# A lone failed review (and even one that exhausts its transport retries)
+# must not flip the AI badge; only a sustained run of failures — with no
+# success in between — means the provider is actually down. Sized above
+# attempts-per-review (Bedrock max_retries + 1 = 3).
+DEGRADED_AFTER_CONSECUTIVE_FAILURES = 6
+
+
 class AIHealth:
     """Lightweight provider health updated by real traffic, never by status polling."""
 
@@ -42,16 +50,27 @@ class AIHealth:
         self.last_success_at: datetime | None = None
         self.last_failure_at: datetime | None = None
         self.last_error: str | None = None
+        self.consecutive_failures = 0
 
     def record_success(self) -> None:
         self.reachable = True
+        self.consecutive_failures = 0
         self.last_success_at = datetime.now(UTC)
         self.last_error = None
 
     def record_failure(self, error: str) -> None:
-        self.reachable = False
+        # Dampened: one review fans out to several attempts (Bedrock retries
+        # each failed attempt) across several providers sharing this object,
+        # so a single red review must not paint the whole AI stack DEGRADED.
+        # Only sustained consecutive failures flip the badge; any success
+        # recovers immediately. The threshold exceeds attempts-per-review
+        # (Bedrock max_retries + 1 = 3), so an isolated bad review — even one
+        # that exhausts its retries — never flips it on its own.
+        self.consecutive_failures += 1
         self.last_failure_at = datetime.now(UTC)
         self.last_error = error
+        if self.consecutive_failures >= DEGRADED_AFTER_CONSECUTIVE_FAILURES:
+            self.reachable = False
 
     def snapshot(self) -> dict[str, object]:
         return {
@@ -100,6 +119,10 @@ class OpenAICompatibleAIProvider(AIProvider):
     @property
     def model_name(self) -> str:
         return self.model
+
+    @property
+    def provider_label(self) -> str:
+        return "remote_openai_compatible"
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -177,6 +200,10 @@ class OpenAICompatibleAIProvider(AIProvider):
         except httpx.HTTPError as exc:
             self.health.record_failure(f"inference request failed: {type(exc).__name__}")
             raise RemoteAIUnavailable("AI structured completion failed") from exc
+        except ValidationError as exc:
+            detail = summarize_validation_errors(exc)
+            self.health.record_failure("AI response failed schema validation")
+            raise SchemaValidationError(detail) from exc
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             self.health.record_failure("AI response failed schema validation")
             raise RemoteAIUnavailable("AI structured completion failed") from exc

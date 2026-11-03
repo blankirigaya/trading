@@ -1,3 +1,5 @@
+import { useState } from 'react'
+
 import { PaperBanner } from '@/components/common/PaperBanner'
 import { OfflineBanner } from '@/components/common/Primitives'
 import { Sidebar } from '@/components/layout/Sidebar'
@@ -24,13 +26,14 @@ function ErrorToasts() {
 export function AppShell({ children }: { children: React.ReactNode }) {
   const { data: status, isError } = useSystemStatus()
   const { data: market, isError: marketFailed } = useMarketStatus()
+  const [navCollapsed, setNavCollapsed] = useState(false)
   useEventStream()
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell${navCollapsed ? ' nav-collapsed' : ''}`}>
       <PaperBanner liveOrderExecution={status?.live_order_execution ?? false} />
       <StatusHeader status={status} market={market} marketFailed={marketFailed} />
-      <Sidebar />
+      <Sidebar collapsed={navCollapsed} onToggle={() => setNavCollapsed((value) => !value)} />
       <main className="app-main">
         {isError ? <OfflineBanner /> : null}
         {children}

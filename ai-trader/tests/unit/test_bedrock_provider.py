@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 
 import pytest
 from botocore.exceptions import ClientError, NoCredentialsError, ReadTimeoutError
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 from sqlalchemy import create_engine
 
 import ai_trader.integrations.connectivity as connectivity
@@ -21,6 +21,7 @@ from ai_trader.ai.bedrock import (
     BedrockAIUnavailable,
     BedrockConfigurationError,
 )
+from ai_trader.ai.errors import SchemaValidationError
 from ai_trader.ai.providers import build_ai_provider
 from ai_trader.ai.remote_model import AIHealth, OpenAICompatibleAIProvider
 from ai_trader.config import Settings
@@ -283,7 +284,10 @@ async def test_malformed_bedrock_responses_fail_closed_without_schema_retry(resp
         )
 
     assert len(fake.requests) == 1
-    assert provider.health.reachable is False
+    # One malformed response fails closed but does not flip the badge on its
+    # own (stays UNKNOWN on a fresh object); the error is recorded.
+    assert provider.health.reachable is None
+    assert provider.health.last_error is not None
 
 
 async def test_out_of_range_tool_result_is_rejected_by_local_schema_validation():
@@ -291,7 +295,7 @@ async def test_out_of_range_tool_result_is_rejected_by_local_schema_validation()
     fake = FakeBedrockClient([_tool_response(payload)])
     provider = _provider(fake)
 
-    with pytest.raises(ValidationError):
+    with pytest.raises(SchemaValidationError) as raised:
         await provider.structured_completion(
             "system prompt",
             "user prompt",
@@ -299,6 +303,10 @@ async def test_out_of_range_tool_result_is_rejected_by_local_schema_validation()
             prompt_name="news_analyst",
             prompt_version="v1",
         )
+
+    # The failure must name the offending field, not just say "invalid".
+    assert "confidence" in raised.value.detail
+    assert "confidence" in str(raised.value)
 
 
 @pytest.mark.parametrize(

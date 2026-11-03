@@ -4,6 +4,7 @@ import { HashRouter } from 'react-router-dom'
 
 import { App, createQueryClient } from './App'
 import './styles/global.css'
+import './styles/motion.css'
 
 const container = document.getElementById('root')
 if (!container) throw new Error('root element missing')

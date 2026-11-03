@@ -286,11 +286,29 @@ describe('DecisionDetail', () => {
   it('surfaces a failure reason', () => {
     const record = decision({
       status: 'FAILED',
-      failure_reason: 'local_ai: AI structured completion failed',
+      failure_reason: 'ai: AI structured completion failed',
       orders_generated: [],
     })
     render(<DecisionDetail record={record} />)
-    expect(screen.getByText('local_ai: AI structured completion failed')).toBeInTheDocument()
+    expect(screen.getByText('ai: AI structured completion failed')).toBeInTheDocument()
+  })
+
+  it('separates an invalid AI reply from a deliberate hold', () => {
+    const record = decision({
+      status: 'FAILED',
+      failure_reason:
+        'ai: AI response failed schema validation: cash_percent: Field required',
+      orders_generated: [],
+      final_ai_decision: null,
+      jev_critique: null,
+    })
+    render(<DecisionDetail record={record} />)
+
+    // The header must not claim the AI decided HOLD when nothing was judged.
+    expect(screen.queryByText('HOLD')).not.toBeInTheDocument()
+    expect(screen.getByText('INVALID')).toBeInTheDocument()
+    expect(screen.getByTestId('ai-output-invalid')).toHaveTextContent(/AI output invalid/i)
+    expect(screen.getByTestId('ai-output-invalid')).toHaveTextContent(/not a decision to stay flat/i)
   })
 })
 

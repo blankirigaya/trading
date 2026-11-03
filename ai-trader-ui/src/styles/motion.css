@@ -1,0 +1,170 @@
+/*
+ * Motion system for the institutional terminal.
+ *
+ * Only transform and opacity are animated. Durations follow the tokens
+ * below; reduced-motion users get no movement at all.
+ */
+
+:root {
+  --motion-fast: 110ms;
+  --motion-standard: 160ms;
+  --motion-emphasis: 300ms;
+  --motion-tick: 360ms;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-fast: 0ms;
+    --motion-standard: 0ms;
+    --motion-emphasis: 0ms;
+    --motion-tick: 0ms;
+  }
+}
+
+/* ---------- page transition ---------- */
+
+.page-transition {
+  animation: page-in var(--motion-emphasis) var(--ease-out);
+  animation-fill-mode: both;
+}
+
+@keyframes page-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .page-transition {
+    animation: none;
+  }
+}
+
+/* ---------- modal / drawer ---------- */
+
+.drawer-backdrop {
+  animation: backdrop-in var(--motion-standard) var(--ease-out);
+  animation-fill-mode: both;
+}
+
+@keyframes backdrop-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.drawer {
+  animation: drawer-in var(--motion-emphasis) var(--ease-out);
+  animation-fill-mode: both;
+}
+
+@keyframes drawer-in {
+  from {
+    opacity: 0;
+    transform: translateX(20px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* ---------- price tick ---------- */
+
+@keyframes tick-up {
+  0% {
+    color: var(--ok);
+  }
+  100% {
+    color: inherit;
+  }
+}
+@keyframes tick-down {
+  0% {
+    color: var(--bad);
+  }
+  100% {
+    color: inherit;
+  }
+}
+.tick-up {
+  animation: tick-up var(--motion-tick) var(--ease-standard);
+}
+.tick-down {
+  animation: tick-down var(--motion-tick) var(--ease-standard);
+}
+
+/* ---------- AI decision fade ---------- */
+
+.decision-fade-in {
+  animation: card-in var(--motion-emphasis) var(--ease-out);
+  animation-fill-mode: both;
+}
+
+@keyframes card-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* ---------- micro-interactions ---------- */
+
+.nav-item {
+  transition: background-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
+}
+
+.nav-item svg {
+  transition: color var(--motion-fast) var(--ease-standard);
+}
+
+.btn {
+  transition: border-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard), background-color var(--motion-fast) var(--ease-standard);
+}
+
+input,
+select {
+  transition: border-color var(--motion-fast) var(--ease-standard);
+}
+
+.card {
+  transition: border-color var(--motion-standard) var(--ease-standard);
+}
+
+tbody tr {
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.badge {
+  transition: background-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
+}
+
+.stat {
+  transition: border-color var(--motion-fast) var(--ease-standard);
+}
+
+/* ---------- reduced motion ---------- */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

@@ -1,17 +1,27 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
+import { useQueryClient } from '@tanstack/react-query'
 
 import { Badge, Empty, Stat } from '@/components/common/Primitives'
+import { ConfirmDialog } from '@/components/common/ConfirmDialog'
+import { EquityCurve } from '@/components/common/EquityCurve'
+import { PageHeader } from '@/components/common/PageHeader'
+import { Sparkline } from '@/components/common/Sparkline'
 import { UniverseSwitcher } from '@/components/common/UniverseSwitcher'
 import { DecisionDetail } from '@/components/decisions/DecisionDetail'
+import { api } from '@/api/client'
 import { LiveNewsFeed } from '@/components/news/LiveNews'
 import { NewsLatencyTable } from '@/components/news/NewsLatency'
 import { LiveTimeline } from '@/components/timeline/LiveTimeline'
+import { dedupeClosedTrades, realizedEquityPoints } from '@/analytics/metrics'
 import { useDecisions } from '@/hooks/useDecisions'
+import { useChargeSchedule } from '@/hooks/useCharges'
 import { useMarketSnapshots } from '@/hooks/useSystemStatus'
 import { usePerformance } from '@/hooks/usePortfolio'
 import { usePortfolio } from '@/hooks/usePortfolio'
 import { useSystemStatus } from '@/hooks/useSystemStatus'
+import { useTradeHistory } from '@/hooks/useTrades'
+import { estimateExitChargesInr } from '@/utils/charges'
 import {
   formatDuration,
   formatInr,
@@ -66,28 +76,55 @@ function PortfolioSummary() {
   const today = toNumber(portfolio.realized_pnl) + toNumber(portfolio.unrealized_pnl)
 
   return (
-    <div className="stat-grid">
-      <Stat label="Starting capital" value={formatInr(starting)} testId="stat-starting" />
-      <Stat label="Portfolio value" value={formatInr(total)} testId="stat-value" />
-      <Stat label="Cash" value={formatInr(cash)} testId="stat-cash" />
-      <Stat label="Invested" value={formatInr(invested)} />
-      <Stat
-        label="Realized P&L"
-        value={formatSignedInr(portfolio.realized_pnl)}
-        tone={toNumber(portfolio.realized_pnl) < 0 ? 'neg' : 'pos'}
+    <>
+      <div className="kpi-hero">
+        <Stat hero label="Portfolio value" value={formatInr(total)} testId="stat-value" tone={today < 0 ? 'neg' : 'pos'} sub={`cash ${formatInr(cash)}`} />
+        <Stat hero label="Total P&L" value={formatSignedInr(today)} tone={today < 0 ? 'neg' : 'pos'} testId="stat-pnl" sub={`realized ${formatSignedInr(portfolio.realized_pnl)}`} />
+        <Stat hero label="Cash" value={formatInr(cash)} testId="stat-cash" />
+        <Stat hero label="Invested" value={formatInr(invested)} />
+      </div>
+      <div className="stat-grid">
+        <Stat label="Starting capital" value={formatInr(starting)} testId="stat-starting" />
+        <Stat
+          label="Realized P&L"
+          value={formatSignedInr(portfolio.realized_pnl)}
+          tone={toNumber(portfolio.realized_pnl) < 0 ? 'neg' : 'pos'}
+        />
+        <Stat
+          label="Unrealized P&L"
+          value={formatSignedInr(portfolio.unrealized_pnl)}
+          tone={toNumber(portfolio.unrealized_pnl) < 0 ? 'neg' : 'pos'}
+        />
+        <Stat label="Open positions" value={formatInteger(positions.length)} />
+      </div>
+    </>
+  )
+}
+
+function PortfolioEquity() {
+  // Realized equity from the permanent closed-trade ledger, not journalled
+  // per-shard snapshots: each decision's portfolio_after is one shard's book
+  // (capital is split across shards), so plotting those against total
+  // starting capital understates equity and pins the curve red.
+  const { data: history } = useTradeHistory()
+  const { data: status } = useSystemStatus()
+  const starting = toNumber(status?.shadow_initial_capital_inr ?? '100000')
+  const trades = dedupeClosedTrades(history?.closed_trades ?? [])
+  if (trades.length < 2) return null
+  const points = realizedEquityPoints(trades, starting)
+  if (points.length < 2) return null
+  return (
+    <div className="card">
+      <div className="card-title">
+        <span>Portfolio equity</span>
+        <Badge tone="neutral">Closed trades only</Badge>
+      </div>
+      <EquityCurve
+        points={points}
+        startingCapital={starting}
+        basisLabel="Realized equity (closed trades)"
+        testId="equity-curve"
       />
-      <Stat
-        label="Unrealized P&L"
-        value={formatSignedInr(portfolio.unrealized_pnl)}
-        tone={toNumber(portfolio.unrealized_pnl) < 0 ? 'neg' : 'pos'}
-      />
-      <Stat
-        label="Total P&L"
-        value={formatSignedInr(today)}
-        tone={today < 0 ? 'neg' : 'pos'}
-        testId="stat-pnl"
-      />
-      <Stat label="Open positions" value={formatInteger(positions.length)} />
     </div>
   )
 }
@@ -95,6 +132,8 @@ function PortfolioSummary() {
 function OpenPositions() {
   const { data: portfolio } = usePortfolio()
   const { data: snapshots } = useMarketSnapshots()
+  const { data: schedule } = useChargeSchedule()
+  const rates = schedule?.enabled === true ? schedule.rates : null
   const prevPrices = useRef(new Map<string, number>())
   const priceBySymbol = new Map(
     (snapshots ?? []).map((snapshot) => [snapshot.instrument.symbol, snapshot.last_price]),
@@ -109,6 +148,7 @@ function OpenPositions() {
       {positions.length === 0 ? (
         <Empty>No open simulated positions</Empty>
       ) : (
+        <div className="table-scroll">
         <table>
           <thead>
             <tr>
@@ -119,6 +159,7 @@ function OpenPositions() {
               <th className="num">LTP</th>
               <th className="num">Value</th>
               <th className="num">Unrealized</th>
+              <th className="num" title="Unrealized P&L minus estimated exit charges at LTP (same Zerodha intraday schedule as fills)">Est.&nbsp;net</th>
               <th className="num">P&amp;L %</th>
             </tr>
           </thead>
@@ -132,6 +173,8 @@ function OpenPositions() {
               const value = ltp * position.quantity
               const pnl = (ltp - avg) * position.quantity
               const pnlPct = avg ? ((ltp - avg) / avg) * 100 : 0
+              const exitFee = rates ? estimateExitChargesInr(value, rates) : null
+              const net = exitFee === null ? null : pnl - exitFee
               return (
                 <tr key={position.symbol}>
                   <td>
@@ -147,12 +190,14 @@ function OpenPositions() {
                   </td>
                   <td className="num">{formatInr(value)}</td>
                   <td className={`num ${pnl < 0 ? 'neg' : 'pos'}`}>{formatSignedInr(pnl)}</td>
+                  <td className={`num ${net === null ? '' : net < 0 ? 'neg' : 'pos'}`} title={net === null ? 'Exit-charge schedule unavailable' : `Unrealized ${formatSignedInr(pnl)} minus est. exit charges ${formatInr(exitFee ?? 0)}`}>{net === null ? '—' : formatSignedInr(net)}</td>
                   <td className={`num ${pnlPct < 0 ? 'neg' : 'pos'}`}>{pnlPct.toFixed(2)}%</td>
                 </tr>
               )
             })}
           </tbody>
         </table>
+        </div>
       )}
     </div>
   )
@@ -193,6 +238,10 @@ function MarketSnapshotStrip() {
           const prev = prevPrices.current.get(snapshot.instrument.symbol)
           prevPrices.current.set(snapshot.instrument.symbol, price)
           const tick = prev === undefined || prev === price ? null : price > prev ? 'up' : 'down'
+          const closes = (snapshot.recent_1m_candles ?? [])
+            .map((candle) => toNumber(candle.close))
+            .filter((value) => Number.isFinite(value))
+            .slice(-40)
           return (
             <Stat
               key={snapshot.instrument.symbol}
@@ -205,6 +254,12 @@ function MarketSnapshotStrip() {
                   <span className={change !== null && change < 0 ? 'neg' : 'pos'}>
                     {change === null ? '' : `${change >= 0 ? '+' : ''}${change.toFixed(2)}%`}
                   </span>
+                  {closes.length > 1 ? (
+                    <>
+                      <br />
+                      <Sparkline points={closes} />
+                    </>
+                  ) : null}
                 </>
               }
             />
@@ -302,10 +357,34 @@ function AiUsage() {
 export function Dashboard() {
   const { data: decisions } = useDecisions()
   const latest = decisions?.[0]
+  const queryClient = useQueryClient()
+  const [confirmingReview, setConfirmingReview] = useState(false)
+  const [reviewState, setReviewState] = useState<'idle' | 'running' | 'done' | 'error'>('idle')
+  const [reviewError, setReviewError] = useState<string | null>(null)
+
+  const requestReview = async () => {
+    setConfirmingReview(false)
+    setReviewState('running')
+    setReviewError(null)
+    try {
+      const result = await api.requestReview()
+      await queryClient.invalidateQueries({ queryKey: ['decisions'] })
+      setReviewState(result.requested ? 'done' : 'idle')
+    } catch (err) {
+      setReviewState('error')
+      setReviewError(err instanceof Error ? err.message : 'review request failed')
+    }
+  }
 
   return (
     <div>
+      <PageHeader
+        eyebrow="Overview"
+        title="Trading desk"
+        sub="Paper portfolio, live market, and the latest AI reasoning — all simulated funds."
+      />
       <PortfolioSummary />
+      <PortfolioEquity />
       <UniverseSwitcher />
       <div className="two-col">
         <div>
@@ -316,12 +395,44 @@ export function Dashboard() {
           <div className="card">
             <div className="card-title">
               <span>Latest AI decision</span>
-              {latest ? (
-                <Link to="/decisions" className="dim">
-                  View all
-                </Link>
-              ) : null}
+              <span style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <button
+                  type="button"
+                  className="btn"
+                  data-testid="request-review"
+                  disabled={reviewState === 'running'}
+                  onClick={() => setConfirmingReview(true)}
+                  title="Force a full AI review now across all shards with live market data"
+                >
+                  {reviewState === 'running' ? 'Reviewing…' : 'Request review'}
+                </button>
+                {latest ? (
+                  <Link to="/decisions" className="dim">
+                    View all
+                  </Link>
+                ) : null}
+              </span>
             </div>
+            {reviewState === 'done' ? (
+              <div className="faint" data-testid="review-requested">
+                Review requested — the latest decision below refreshes when it lands.
+              </div>
+            ) : null}
+            {reviewState === 'error' ? (
+              <div className="neg" data-testid="review-error">
+                Review failed: {reviewError ?? 'unknown error'}
+              </div>
+            ) : null}
+            {confirmingReview ? (
+              <ConfirmDialog
+                title="Request an AI review now?"
+                body="Runs a full review immediately across all shards on live market data, outside the regular cadence. This spends one review cycle and can place paper orders."
+                confirmLabel="Run review"
+                onConfirm={() => void requestReview()}
+                onCancel={() => setConfirmingReview(false)}
+                testId="confirm-review"
+              />
+            ) : null}
             {latest ? (
               <DecisionDetail record={latest} />
             ) : (

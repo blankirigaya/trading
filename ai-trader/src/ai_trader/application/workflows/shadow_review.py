@@ -3,12 +3,17 @@ import logging
 import uuid
 from collections.abc import Callable, Mapping
 from datetime import datetime
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 
 from ai_trader.ai.jev import JevCritic, JevUnavailable
-from ai_trader.ai.portfolio_manager import PortfolioManagerAgent
+from ai_trader.ai.portfolio_manager import (
+    OpenPositionBrief,
+    PortfolioManagerAgent,
+    render_open_position_brief,
+)
 from ai_trader.ai.remote_model import RemoteAIUnavailable
 from ai_trader.ai.retries import StructuredCompletionFailed
+from ai_trader.brokers.charges import ChargeRates, evaluate_entry_edge
 from ai_trader.brokers.paper import PaperBroker
 from ai_trader.domain.common import Clock
 from ai_trader.domain.decisions import (
@@ -20,7 +25,7 @@ from ai_trader.domain.decisions import (
     TradeProposal,
 )
 from ai_trader.domain.market import Instrument, MarketState
-from ai_trader.domain.orders import Order, OrderRequest
+from ai_trader.domain.orders import Order, OrderRequest, OrderSide
 from ai_trader.domain.portfolio import PortfolioState
 from ai_trader.execution.service import ExecutionAdjustmentRequired, ExecutionService
 from ai_trader.journal.service import DecisionJournal, DecisionRecord
@@ -38,6 +43,7 @@ TRADE_ACTIONS = frozenset(
     }
 )
 EXIT_ACTIONS = frozenset({PortfolioAction.CLOSE_POSITION, PortfolioAction.REDUCE_POSITION})
+ENTRY_ACTIONS = frozenset({PortfolioAction.OPEN_POSITION, PortfolioAction.INCREASE_POSITION})
 
 
 class ShadowReviewWorkflow:
@@ -54,6 +60,9 @@ class ShadowReviewWorkflow:
         clock: Clock,
         event_sink: Callable[..., None] | None = None,
         latency_sink: Callable[[str, str, datetime], None] | None = None,
+        jev_min_entry_score: float = 0.65,
+        charge_rates: ChargeRates | None = None,
+        min_edge_cost_multiple: Decimal = Decimal("2.5"),
     ) -> None:
         self.manager = manager
         self.critic = critic
@@ -61,6 +70,9 @@ class ShadowReviewWorkflow:
         self.safety = safety
         self.execution = execution
         self.journal = journal
+        self.jev_min_entry_score = jev_min_entry_score
+        self.charge_rates = charge_rates
+        self.min_edge_cost_multiple = min_edge_cost_multiple
         self.clock = clock
         self.event_sink = event_sink
         # (stage, analysis_id, timestamp) so news latency can be measured end to end.
@@ -160,6 +172,146 @@ class ShadowReviewWorkflow:
                 reasons.append("symbol not on the reviewed board")
         return f"{proposal.action.value} {symbol}: {', '.join(reasons) or 'not executable'}"
 
+    async def _open_position_brief(
+        self, portfolio: PortfolioState, prices: Mapping[str, Decimal] | None
+    ) -> str:
+        """Pre-digested exit block: unrealized P&L, age, and the entry plan.
+
+        Best effort by design: any lookup failure degrades that position's
+        line to the raw book facts instead of failing the review. Entry plans
+        come from the journaled entry decision the ledger links to the open
+        position.
+        """
+        return render_open_position_brief(await self._position_views(portfolio, prices))
+
+    async def _position_views(
+        self, portfolio: PortfolioState, prices: Mapping[str, Decimal] | None
+    ) -> list[OpenPositionBrief]:
+        views: list[OpenPositionBrief] = []
+        marks = prices or {}
+        for position in portfolio.positions:
+            if not position.quantity:
+                continue
+            symbol = position.symbol
+            ltp = marks.get(symbol, marks.get(symbol.upper()))
+            unrealized: Decimal | None = None
+            unrealized_pct: Decimal | None = None
+            if ltp is not None and ltp > 0:
+                unrealized = (ltp - position.average_entry_price) * position.quantity
+                notional = position.average_entry_price * position.quantity
+                if notional > 0:
+                    unrealized_pct = unrealized / notional * Decimal(100)
+            held_minutes: int | None = None
+            target: Decimal | None = None
+            invalidation: Decimal | None = None
+            thesis: str | None = None
+            try:
+                ledger = getattr(self.broker, "ledger", None)
+                shard = getattr(self.broker, "shard", 0)
+                entry_id: str | None = None
+                opened_at = None
+                if ledger is not None:
+                    entry_id, opened_at = await ledger.position_open_context(
+                        shard, symbol
+                    )
+                if opened_at is not None:
+                    held_minutes = int(
+                        (self.clock.now() - opened_at).total_seconds() // 60
+                    )
+                if entry_id:
+                    record = await self.journal.get(entry_id)
+                    proposals = (
+                        record.initial_ai_proposal.proposals if record is not None else []
+                    )
+                    entry = next(
+                        (
+                            proposal
+                            for proposal in proposals
+                            if (proposal.symbol or "").upper() == symbol.upper()
+                        ),
+                        None,
+                    )
+                    if entry is not None:
+                        target = entry.target_price
+                        invalidation = entry.invalidation_price
+                        thesis = entry.thesis
+            except Exception:  # noqa: BLE001 - brief enrichment must never fail a review
+                logger.debug(
+                    "position brief enrichment unavailable for %s", symbol, exc_info=True
+                )
+            views.append(
+                OpenPositionBrief(
+                    symbol=symbol,
+                    quantity=position.quantity,
+                    average_entry_price=position.average_entry_price,
+                    last_price=ltp,
+                    unrealized_inr=unrealized,
+                    unrealized_pct=unrealized_pct,
+                    held_minutes=held_minutes,
+                    target_price=target,
+                    invalidation_price=invalidation,
+                    entry_thesis=thesis,
+                )
+            )
+        return views
+
+    async def _enforce_invalidations(
+        self, views: list[OpenPositionBrief], snapshot_id: str
+    ) -> None:
+        """Close positions trading at or below their AI-set invalidation level.
+
+        Runs before any AI judgment so a failed or indecisive review cannot
+        strand a broken trade. No invalidation recorded, no live mark, or an
+        engaged kill switch all mean hands off: never invent an exit level and
+        never trade blind. Closes go straight to the paper broker (exits only
+        ever reduce exposure, so no safety check); failures are logged and the
+        review continues so one stuck symbol cannot block the board.
+        """
+        if getattr(self.safety.kill_switch, "enabled", False):
+            return
+        for view in views:
+            if view.invalidation_price is None:
+                continue
+            if view.last_price is None or view.last_price <= 0:
+                continue
+            if view.last_price > view.invalidation_price:
+                continue
+            proposal = TradeProposal(
+                proposal_id=f"guardrail-{view.symbol}-{uuid.uuid4().hex[:8]}",
+                symbol=view.symbol,
+                exchange="NSE",
+                action=PortfolioAction.CLOSE_POSITION,
+                side=OrderSide.SELL,
+                capital_allocation_inr=None,
+                quantity_shares=view.quantity,
+                confidence=1.0,
+                thesis=(
+                    f"Invalidation guardrail: {view.symbol} at {view.last_price:.2f} "
+                    f"reached the entry plan's invalidation level {view.invalidation_price:.2f}."
+                ),
+                evidence=[f"LTP {view.last_price:.2f} <= invalidation {view.invalidation_price:.2f}"],
+                conditions_that_change_thesis=[],
+            )
+            try:
+                request = self.execution.prepare(
+                    f"guardrail-{uuid.uuid4().hex[:12]}",
+                    snapshot_id,
+                    proposal,
+                    view.last_price,
+                )
+                await self.execution.submit(request)
+            except Exception as exc:  # noqa: BLE001 - one stuck exit must not stop reviews
+                logger.warning("invalidation guardrail failed for %s: %s", view.symbol, exc)
+                continue
+            self._emit(
+                "PAPER",
+                "guardrail_close",
+                f"INVALIDATION {view.symbol} {view.quantity} @ {view.last_price:.2f} "
+                f"(invalidation {view.invalidation_price:.2f}, paper)",
+                symbol=view.symbol,
+            )
+            self.safety.record_submission()
+
     async def run(
         self,
         state: MarketState,
@@ -173,6 +325,12 @@ class ShadowReviewWorkflow:
         decision_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{event_id}:shadow-decision"))
         trigger_ids = news.trigger_item_ids if news is not None else ()
         before = await self.broker.get_account()
+        views = await self._position_views(before, prices)
+        position_brief = render_open_position_brief(views)
+        # Invalidation guardrail: the AI's own thesis-break level is enforced
+        # deterministically before any AI judgment, so a failed AI review can
+        # never strand a broken trade. Exits only; entries are the Jev gate's job.
+        await self._enforce_invalidations(views, state.snapshot_id)
         context_hash = hashlib.sha256(
             (
                 state.model_dump_json()
@@ -193,11 +351,12 @@ class ShadowReviewWorkflow:
         )
         try:
             initial, metadata = await self.manager.review(
-                state.recent_ticks[-1], before, news, board=board_states
+                state.recent_ticks[-1], before, news, board=board_states,
+                position_brief=position_brief,
             )
         except (RemoteAIUnavailable, StructuredCompletionFailed) as exc:
             self._emit("ERROR", "provider_error", f"Remote AI unavailable: {exc}")
-            return await self._failure(decision_id, state, before, context_hash, f"local_ai: {exc}")
+            return await self._failure(decision_id, state, before, context_hash, f"ai: {exc}")
         self._emit(
             "AI",
             "ai_initial_decision",
@@ -334,6 +493,40 @@ class ShadowReviewWorkflow:
         )
         # The AI has now judged, with news in hand. This is the news-to-decision point.
         self._mark("decision", trigger_ids)
+        # Jev entry bar: entries need a convincingly scored thesis; weak agrees
+        # used to sail through and bleed on charges. Exits are never gated —
+        # banking a winner must stay frictionless.
+        entry_proposals = [
+            proposal
+            for proposal in final_proposal.proposals
+            if proposal.action in ENTRY_ACTIONS
+        ]
+        exit_proposals = [
+            proposal
+            for proposal in final_proposal.proposals
+            if proposal.action in EXIT_ACTIONS
+        ]
+        if (
+            entry_proposals
+            and not exit_proposals
+            and getattr(self.critic, "assesses", True)
+            and critique.score < self.jev_min_entry_score
+        ):
+            reason = (
+                f"jev gate: entry score {critique.score:.2f} below minimum "
+                f"{self.jev_min_entry_score:.2f}"
+            )
+            self._emit("SAFETY", "safety_result", f"DENY: {reason}")
+            record = record.model_copy(
+                update={
+                    "status": DecisionStatus.DENIED_BY_SAFETY,
+                    "failure_reason": reason,
+                    "safety_allowed": False,
+                    "safety_reason": reason,
+                }
+            )
+            await self.journal.save(record)
+            return record
         if not executable:
             if final.proposals:
                 reasons = "; ".join(
@@ -350,6 +543,22 @@ class ShadowReviewWorkflow:
                 )
             else:
                 self._emit("AI", "ai_hold", "AI chose to hold or stay in cash")
+            await self.journal.save(record)
+            return record
+        edge_reason = self._entry_edge_reason(executable[0], exec_state.last_price)
+        if edge_reason is not None:
+            # Deterministic last line before the order is built: a target that
+            # cannot pay for its own two fills is refused regardless of how
+            # confident the model or the critic is.
+            self._emit("SAFETY", "safety_result", f"DENY: {edge_reason}")
+            record = record.model_copy(
+                update={
+                    "status": DecisionStatus.DENIED_BY_SAFETY,
+                    "failure_reason": edge_reason,
+                    "safety_allowed": False,
+                    "safety_reason": edge_reason,
+                }
+            )
             await self.journal.save(record)
             return record
         try:
@@ -406,6 +615,42 @@ class ShadowReviewWorkflow:
         # End of the news-to-trade chain: the paper order exists.
         self._mark("paper_order", trigger_ids)
         return record
+
+    def _entry_edge_reason(self, proposal: TradeProposal, price: Decimal) -> str | None:
+        """Refuse an entry whose stated target cannot pay for its own round trip.
+
+        Purely arithmetic over the charge schedule — no AI call, no judgement,
+        so it cannot be argued out of by a confident model. Applies only to
+        entries: exits must stay frictionless even when they realise a loss.
+        A proposal with no target (or no way to size it) is not refused here;
+        it is simply unverifiable and keeps the existing execution checks.
+        """
+        if proposal.action not in ENTRY_ACTIONS:
+            return None
+        if self.charge_rates is None or self.min_edge_cost_multiple <= 0:
+            return None
+        entry_price = proposal.desired_entry_price or price
+        quantity = proposal.quantity_shares
+        if quantity is None:
+            allocation = proposal.capital_allocation_inr
+            if allocation is None or entry_price <= 0:
+                return None
+            quantity = int((allocation / entry_price).to_integral_value(rounding=ROUND_DOWN))
+        edge = evaluate_entry_edge(
+            entry_price=entry_price,
+            target_price=proposal.target_price,
+            quantity=quantity,
+            rates=self.charge_rates,
+            required_multiple=self.min_edge_cost_multiple,
+        )
+        if edge.multiple is None or edge.allowed:
+            return None
+        return (
+            f"edge gate: target {proposal.target_price} earns "
+            f"{edge.expected_gross_inr:.2f} INR gross against "
+            f"{edge.round_trip_cost_inr:.2f} INR round-trip charges "
+            f"({edge.multiple:.2f}x, needs {edge.required_multiple}x)"
+        )
 
     def _describe(self, decision: PortfolioDecision) -> str:
         """Short human-readable summary of a structured decision for the timeline."""
@@ -480,10 +725,12 @@ class ShadowReviewWorkflow:
                 allocations=[],
                 proposals=[],
                 market_summary="Remote AI unavailable",
-                decision_summary="No new trade: remote AI service did not return a valid decision.",
+                decision_summary=(
+                    "No decision produced: the AI provider returned no usable decision."
+                ),
             ),
             initial_provider_metadata=ProviderMetadata(
-                provider="remote_openai_compatible",
+                provider=self.manager.provider.provider_label,
                 model=self.manager.provider.model_name,
                 prompt_name="portfolio_manager",
                 prompt_version=self.manager.prompt_version,

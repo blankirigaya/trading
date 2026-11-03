@@ -20,7 +20,7 @@ export function Badge({
   children,
   testId,
 }: {
-  tone?: 'ok' | 'warn' | 'bad' | 'neutral' | 'paper' | 'accent'
+  tone?: 'ok' | 'warn' | 'bad' | 'neutral' | 'paper' | 'accent' | 'ai'
   children: React.ReactNode
   testId?: string
 }) {
@@ -36,12 +36,27 @@ export function Stat({
   value,
   tone,
   testId,
+  hero = false,
+  sub,
 }: {
   label: string
   value: React.ReactNode
   tone?: 'pos' | 'neg'
   testId?: string
+  hero?: boolean
+  sub?: React.ReactNode
 }) {
+  if (hero) {
+    return (
+      <div className={`kpi${tone ? ` tone-${tone}` : ''}`}>
+        <div className="kpi-label">{label}</div>
+        <div className={`kpi-value${tone ? ` ${tone}` : ''}`} data-testid={testId}>
+          {value}
+        </div>
+        {sub !== undefined ? <div className="kpi-sub">{sub}</div> : null}
+      </div>
+    )
+  }
   return (
     <div className="stat">
       <div className="stat-label">{label}</div>

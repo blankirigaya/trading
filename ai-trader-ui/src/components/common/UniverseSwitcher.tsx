@@ -8,15 +8,18 @@ import { Badge } from '@/components/common/Primitives'
 import { useSystemStatus } from '@/hooks/useSystemStatus'
 
 const MODES: Array<{ id: UniverseMode; label: string; hint: string }> = [
-  { id: 'cheap', label: 'Cheap', hint: '50 symbols under ₹200' },
-  { id: 'mixed', label: 'Mixed', hint: '25 cheap + 25 expensive' },
-  { id: 'expensive', label: 'Expensive', hint: '50 symbols at or above ₹200' },
+  { id: 'cheap', label: 'Cheap', hint: 'Symbols under ₹200' },
+  { id: 'mixed', label: 'Mixed', hint: 'Split of cheap and expensive' },
+  { id: 'expensive', label: 'Expensive', hint: 'Symbols at or above ₹200' },
 ]
 
-const BODY: Record<UniverseMode, string> = {
-  cheap: 'The AI will review 50 liquid symbols trading below ₹200, re-classified from live FYERS prices.',
-  mixed: 'The AI will review 25 cheap and 25 expensive liquid symbols, re-classified from live FYERS prices.',
-  expensive: 'The AI will review 50 liquid symbols trading at or above ₹200, re-classified from live FYERS prices.',
+const BODY: Record<UniverseMode, (count: number) => string> = {
+  cheap: (count) =>
+    `The AI will review ${count} liquid symbols trading below ₹200, re-classified from live FYERS prices.`,
+  mixed: (count) =>
+    `The AI will review ${count} liquid symbols, split between cheap and expensive buckets re-classified from live FYERS prices.`,
+  expensive: (count) =>
+    `The AI will review ${count} liquid symbols trading at or above ₹200, re-classified from live FYERS prices.`,
 }
 
 /**
@@ -82,7 +85,7 @@ export function UniverseSwitcher() {
         <ConfirmDialog
           testId="universe-dialog"
           title={`Switch the AI universe to ${pending}?`}
-          body={`${BODY[pending]} The feed resubscribes at the next review cycle. Positions are not closed.`}
+          body={`${BODY[pending](watched)} The feed resubscribes at the next review cycle. Positions are not closed.`}
           confirmLabel="Switch universe"
           onCancel={() => setPending(null)}
           onConfirm={() => void apply(pending)}

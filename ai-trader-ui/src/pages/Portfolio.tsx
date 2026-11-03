@@ -1,4 +1,5 @@
 import { Badge, Empty, Stat } from '@/components/common/Primitives'
+import { PageHeader } from '@/components/common/PageHeader'
 import { usePortfolio } from '@/hooks/usePortfolio'
 import { useSystemStatus } from '@/hooks/useSystemStatus'
 import { formatInr, formatSignedInr, toNumber } from '@/utils/format'
@@ -37,16 +38,23 @@ export function Portfolio() {
 
   return (
     <div>
+      <PageHeader
+        eyebrow="Paper trading"
+        title="Portfolio"
+        sub="Simulated valuation and allocation. Display only — no advice, no orders."
+      />
       <div className="card">
         <div className="card-title">
           <span>Paper portfolio</span>
           <Badge tone="paper">PaperBroker &mdash; simulated funds</Badge>
         </div>
+        <div className="kpi-hero">
+          <Stat hero label="Portfolio value" value={formatInr(total)} testId="portfolio-value" tone={toNumber(portfolio.unrealized_pnl) < 0 ? 'neg' : 'pos'} />
+          <Stat hero label="Invested" value={formatInr(invested)} />
+          <Stat hero label="Cash" value={formatInr(cash)} />
+        </div>
         <div className="stat-grid">
           <Stat label="Starting capital" value={formatInr(starting)} />
-          <Stat label="Portfolio value" value={formatInr(total)} testId="portfolio-value" />
-          <Stat label="Cash" value={formatInr(cash)} />
-          <Stat label="Invested" value={formatInr(invested)} />
           <Stat
             label="Realized P&L"
             value={formatSignedInr(portfolio.realized_pnl)}

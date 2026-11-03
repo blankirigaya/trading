@@ -1,9 +1,12 @@
 import { Link } from 'react-router-dom'
 
 import { Badge, Empty, Stat } from '@/components/common/Primitives'
+import { PageHeader } from '@/components/common/PageHeader'
 import { useBots } from '@/hooks/useBots'
+import { useChargeSchedule } from '@/hooks/useCharges'
 import { useMarketSnapshots } from '@/hooks/useSystemStatus'
 import type { TradingBot } from '@/api/types'
+import { estimateExitChargesInr } from '@/utils/charges'
 import {
   formatInr,
   formatInteger,
@@ -15,6 +18,8 @@ import {
 
 function BotCard({ bot }: { bot: TradingBot }) {
   const { data: snapshots } = useMarketSnapshots()
+  const { data: schedule } = useChargeSchedule()
+  const rates = schedule?.enabled === true ? schedule.rates : null
   const priceBySymbol = new Map(
     (snapshots ?? []).map((snapshot) => [snapshot.instrument.symbol, snapshot.last_price]),
   )
@@ -48,6 +53,7 @@ function BotCard({ bot }: { bot: TradingBot }) {
       {bot.positions.length === 0 ? (
         <Empty>No open positions — this bot holds only cash right now.</Empty>
       ) : (
+        <div className="table-scroll">
         <table>
           <thead>
             <tr>
@@ -57,6 +63,7 @@ function BotCard({ bot }: { bot: TradingBot }) {
               <th className="num">LTP</th>
               <th className="num">Value</th>
               <th className="num">Unrealized</th>
+              <th className="num" title="Unrealized P&L minus estimated exit charges at LTP (same Zerodha intraday schedule as fills)">Est.&nbsp;net</th>
             </tr>
           </thead>
           <tbody>
@@ -65,6 +72,8 @@ function BotCard({ bot }: { bot: TradingBot }) {
               const ltp = toNumber(priceBySymbol.get(position.symbol) ?? position.ltp)
               const value = ltp * position.quantity
               const pnl = (ltp - avg) * position.quantity
+              const exitFee = rates ? estimateExitChargesInr(value, rates) : null
+              const net = exitFee === null ? null : pnl - exitFee
               return (
                 <tr key={position.symbol}>
                   <td>
@@ -75,11 +84,13 @@ function BotCard({ bot }: { bot: TradingBot }) {
                   <td className="num">{formatPrice(ltp)}</td>
                   <td className="num">{formatInr(value)}</td>
                   <td className={`num ${pnl < 0 ? 'neg' : 'pos'}`}>{formatSignedInr(pnl)}</td>
+                  <td className={`num ${net === null ? '' : net < 0 ? 'neg' : 'pos'}`} title={net === null ? 'Exit-charge schedule unavailable' : `Unrealized ${formatSignedInr(pnl)} minus est. exit charges ${formatInr(exitFee ?? 0)}`}>{net === null ? '—' : formatSignedInr(net)}</td>
                 </tr>
               );
             })}
           </tbody>
         </table>
+        </div>
       )}
       <div className="card-title" style={{ marginTop: 12 }}>
         <span>Recent decisions</span>
@@ -87,6 +98,7 @@ function BotCard({ bot }: { bot: TradingBot }) {
       {bot.recent_decisions.length === 0 ? (
         <div className="faint">No decisions journalled for this bot&apos;s symbols yet.</div>
       ) : (
+        <div className="table-scroll">
         <table>
           <thead>
             <tr>
@@ -117,6 +129,7 @@ function BotCard({ bot }: { bot: TradingBot }) {
             ))}
           </tbody>
         </table>
+        </div>
       )}
     </div>
   )
@@ -128,13 +141,25 @@ export function Bots() {
   if (isLoading) return <Empty>Loading bots…</Empty>
   if (!bots?.length) {
     return (
-      <Empty>
-        No reviewer bots are attached. Start a shadow session to activate them.
-      </Empty>
+      <div>
+        <PageHeader
+          eyebrow="AI intelligence"
+          title="Reviewer bots"
+          sub="One card per parallel AI reviewer with its own paper book."
+        />
+        <Empty>
+          No reviewer bots are attached. Start a shadow session to activate them.
+        </Empty>
+      </div>
     )
   }
   return (
     <div>
+      <PageHeader
+        eyebrow="AI intelligence"
+        title="Reviewer bots"
+        sub="One card per parallel AI reviewer with its own paper book."
+      />
       <p className="faint" style={{ marginBottom: 12 }}>
         {bots.length} AI reviewer{bots.length === 1 ? '' : 's'} running in parallel, each with its
         own paper book. Combined totals stay on the Dashboard.

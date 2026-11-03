@@ -10,6 +10,7 @@ successful autonomous decision.
 
 from dataclasses import dataclass
 
+from ai_trader.ai.entry_plan import EntryPlanRequired
 from ai_trader.ai.jev import build_critic
 from ai_trader.ai.portfolio_manager import PortfolioManagerAgent, position_limits_text
 from ai_trader.ai.providers import build_ai_provider
@@ -134,14 +135,16 @@ async def run_once_shadow(
     )
 
     remote_provider = build_ai_provider(settings, cadence=True)
-    provider = RetryingAIProvider(remote_provider, settings.ai_schema_max_retries)
+    provider = RetryingAIProvider(
+        EntryPlanRequired(remote_provider), settings.ai_schema_max_retries
+    )
 
     critic = build_critic(settings)
 
     workflow = ShadowReviewWorkflow(
         PortfolioManagerAgent(
             provider,
-            "v11",
+            "v13",
             position_limits=position_limits_text(
                 settings,
                 capital_cap_disabled=capital_cap_disabled,
@@ -154,6 +157,9 @@ async def run_once_shadow(
         ExecutionService(broker),
         journal,
         clock,
+        jev_min_entry_score=settings.jev_min_entry_score,
+        charge_rates=charge_rates_for(settings),
+        min_edge_cost_multiple=settings.min_edge_cost_multiple,
     )
     try:
         record = await workflow.run(state, board=board)

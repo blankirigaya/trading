@@ -35,9 +35,10 @@ from botocore.exceptions import (  # type: ignore[import-untyped]
     SSLError,
     UnknownRegionError,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from ai_trader.ai.base import AIProvider
+from ai_trader.ai.errors import SchemaValidationError, summarize_validation_errors
 from ai_trader.ai.remote_model import AIHealth, RemoteAIUnavailable
 from ai_trader.config import Settings
 from ai_trader.domain.decisions import ProviderMetadata
@@ -239,6 +240,10 @@ class BedrockAIProvider(AIProvider):
     def model_name(self) -> str:
         return self.model_id
 
+    @property
+    def provider_label(self) -> str:
+        return "bedrock"
+
     async def aclose(self) -> None:
         client, self._client = self._client, None
         if client is None:
@@ -309,6 +314,21 @@ class BedrockAIProvider(AIProvider):
                 # the shared schema-retry wrapper can distinguish malformed output.
                 try:
                     parsed = response_model.model_validate(self._tool_input(response))
+                except ValidationError as exc:
+                    # Carry the field-level reason: the retry prompt and the
+                    # decision record both need to say WHAT was wrong, otherwise
+                    # the model repeats the same mistake and the operator is blind.
+                    detail = summarize_validation_errors(exc)
+                    self.health.record_failure("AI response failed schema validation")
+                    logger.warning(
+                        "bedrock response failed schema validation",
+                        extra={
+                            "model_id": self.model_id,
+                            "outcome": "schema_invalid",
+                            "schema_detail": detail,
+                        },
+                    )
+                    raise SchemaValidationError(detail) from exc
                 except Exception as exc:  # noqa: BLE001 - record every failed interpretation
                     self.health.record_failure(type(exc).__name__)
                     raise

@@ -1,6 +1,7 @@
 import { Empty, Stat } from '@/components/common/Primitives'
+import { PageHeader } from '@/components/common/PageHeader'
 import { usePerformance } from '@/hooks/usePortfolio'
-import { formatInr, formatLatency, formatSignedInr } from '@/utils/format'
+import { formatInr, formatLatency, formatSignedInr, toNumber } from '@/utils/format'
 
 /**
  * Reporting over backend counters only. No performance model, ranking, or
@@ -15,13 +16,20 @@ export function Performance() {
 
   return (
     <div>
+      <PageHeader
+        eyebrow="AI intelligence"
+        title="Performance"
+        sub="Backend-reported paper results. No models, rankings, or trade signals here."
+      />
       <div className="card">
         <div className="card-title">Paper P&amp;L</div>
-        <div className="stat-grid">
-          <Stat label="Total P&L" value={formatSignedInr(data.total_pnl)} testId="perf-total-pnl" />
-          <Stat label="Realized P&L (net)" value={formatSignedInr(data.realized_pnl)} testId="perf-realized-pnl" />
-          <Stat label="Charges paid" value={formatInr(data.charges_paid)} tone="neg" testId="perf-charges-paid" />
-          <Stat label="Gross realized P&L" value={formatSignedInr(data.gross_realized_pnl)} testId="perf-gross-pnl" />
+        <div className="kpi-hero">
+          <Stat hero label="Total P&L" value={formatSignedInr(data.total_pnl)} tone={toNumber(data.total_pnl) < 0 ? 'neg' : 'pos'} testId="perf-total-pnl" />
+          <Stat hero label="Realized P&L (net)" value={formatSignedInr(data.realized_pnl)} tone={toNumber(data.realized_pnl) < 0 ? 'neg' : 'pos'} testId="perf-realized-pnl" />
+          <Stat hero label="Charges paid" value={formatInr(data.charges_paid)} tone="neg" testId="perf-charges-paid" />
+          <Stat hero label="Gross realized P&L" value={formatSignedInr(data.gross_realized_pnl)} tone={toNumber(data.gross_realized_pnl) < 0 ? 'neg' : 'pos'} testId="perf-gross-pnl" />
+        </div>
+        <div className="stat-grid" style={{ marginTop: 10 }}>
           <Stat label="Unrealized P&L" value={formatSignedInr(data.unrealized_pnl)} />
           <Stat label="Cash" value={formatInr(data.cash)} />
           <Stat label="Open positions" value={data.open_positions} />

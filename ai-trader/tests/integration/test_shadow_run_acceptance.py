@@ -181,6 +181,8 @@ async def test_one_shadow_run_persists_three_stages_and_formats_summary(
                 action=PortfolioAction.OPEN_POSITION,
                 side=OrderSide.BUY,
                 capital_allocation_inr=Decimal("15002.50"),
+                target_price=Decimal("1520.00"),
+                invalidation_price=Decimal("1490.00"),
                 confidence=0.71,
                 thesis="Momentum with volume confirmation.",
                 evidence=["live V3 LTP 1500.25"],
@@ -225,7 +227,9 @@ async def test_one_shadow_run_persists_three_stages_and_formats_summary(
     async def fake_assess(self, proposal, news=None):
         return (
             CriticAssessment(
-                score=0.44,
+                # Above the Jev entry gate: this acceptance test covers
+                # three-stage persistence, not the gate itself.
+                score=0.75,
                 agrees=False,
                 disagreement_signals=["allocation too large relative to evidence"],
                 critique="Reduce the allocation by half.",

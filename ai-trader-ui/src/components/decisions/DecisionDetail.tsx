@@ -1,6 +1,67 @@
+import { Fragment } from 'react'
+
 import type { CriticAssessment, DecisionRecord, PortfolioDecision, TradeProposal } from '@/api/types'
 import { Badge } from '@/components/common/Primitives'
-import { formatInr, formatLatency, formatPercent } from '@/utils/format'
+import { formatDateTime, formatInr, formatLatency, formatPercent, formatPrice } from '@/utils/format'
+
+function actionTone(action: string | undefined): 'ok' | 'warn' | 'bad' | 'neutral' {
+  if (!action) return 'neutral'
+  if (action.includes('CLOSE')) return 'bad'
+  if (action.includes('REDUCE')) return 'warn'
+  if (action.includes('OPEN') || action.includes('INCREASE')) return 'ok'
+  return 'neutral'
+}
+
+/** Read-only decision header: action, symbol, confidence, timestamp. */
+function DecisionHeader({ record, invalid }: { record: DecisionRecord; invalid: boolean }) {
+  const proposal = record.final_ai_decision?.proposals[0] ?? record.initial_ai_proposal.proposals[0]
+  const action = invalid ? 'INVALID' : proposal?.action ?? 'HOLD'
+  const confidence = proposal?.confidence
+  return (
+    <div className="card" data-testid="decision-header">
+      <div className="stage-head">
+        <span className="stage-title">AI decision</span>
+        <Badge tone={invalid ? 'bad' : actionTone(action)}>{action}</Badge>
+      </div>
+      <div className="kv">
+        <dt>Symbol</dt>
+        <dd>{proposal?.symbol ?? record.symbol ?? '—'}</dd>
+        <dt>Side</dt>
+        <dd>{proposal?.side ?? '—'}</dd>
+        <dt>Confidence</dt>
+        <dd>{confidence === undefined || confidence === null ? 'n/a' : formatPercent(confidence, 0)}</dd>
+        <dt>Timestamp</dt>
+        <dd>{formatDateTime(record.timestamp)}</dd>
+      </div>
+    </div>
+  )
+}
+
+/** Trade facts, rendered only when the proposal actually carries them. */
+function TradeInfo({ proposal }: { proposal: TradeProposal | undefined }) {
+  if (!proposal) return null
+  const rows: Array<[string, string]> = []
+  if (proposal.desired_entry_price) rows.push(['Entry price', formatPrice(proposal.desired_entry_price)])
+  if (proposal.target_price) rows.push(['Target price', formatPrice(proposal.target_price)])
+  if (proposal.invalidation_price) rows.push(['Stop-loss level', formatPrice(proposal.invalidation_price)])
+  if (proposal.quantity_shares !== null && proposal.quantity_shares !== undefined)
+    rows.push(['Position size', `${proposal.quantity_shares} shares`])
+  if (proposal.capital_allocation_inr) rows.push(['Allocation', formatInr(proposal.capital_allocation_inr)])
+  if (!rows.length) return null
+  return (
+    <div className="card" data-testid="decision-trade-info">
+      <div className="card-title">Trade information</div>
+      <div className="kv">
+        {rows.map(([label, value]) => (
+          <Fragment key={label}>
+            <dt>{label}</dt>
+            <dd>{value}</dd>
+          </Fragment>
+        ))}
+      </div>
+    </div>
+  )
+}
 
 function proposalSummary(proposal: TradeProposal | undefined): string {
   if (!proposal) return 'No trade proposed'
@@ -173,8 +234,30 @@ function PaperBlock({ record }: { record: DecisionRecord }) {
  * merged with or overwritten by the final decision.
  */
 export function DecisionDetail({ record }: { record: DecisionRecord }) {
+  // A reply that failed validation is a provider/prompt fault, not a decision
+  // to hold. Showing "HOLD" for it tells the operator the AI chose to abstain
+  // when in fact nothing was judged at all.
+  const invalidOutput = record.status === 'FAILED' && (record.failure_reason ?? '').startsWith('ai:')
   return (
     <div data-testid="decision-detail">
+      <DecisionHeader record={record} invalid={invalidOutput} />
+      {invalidOutput ? (
+        <div
+          className="card"
+          data-testid="ai-output-invalid"
+          style={{ borderColor: 'rgba(240,87,106,0.5)' }}
+        >
+          <div className="card-title">
+            <span>AI output invalid</span>
+            <Badge tone="bad">NO DECISION</Badge>
+          </div>
+          <div className="faint">
+            The model replied but its output failed schema validation, so nothing was traded. This is
+            a provider or prompt fault, not a decision to stay flat.
+          </div>
+        </div>
+      ) : null}
+      <TradeInfo proposal={record.final_ai_decision?.proposals[0] ?? record.initial_ai_proposal.proposals[0]} />
       <DecisionBlock
         title="Initial AI Decision"
         stage="initial"

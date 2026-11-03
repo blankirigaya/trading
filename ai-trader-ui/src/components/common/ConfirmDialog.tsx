@@ -1,8 +1,12 @@
+import { createPortal } from 'react-dom'
+
 /**
  * Confirmation gate for controls that change runtime behaviour.
  *
- * Rendered as a centred drawer over a backdrop. It owns no state: the caller
- * decides which action is pending and what confirmation does.
+ * Rendered as a centred modal over a backdrop via a portal to document.body,
+ * so no ancestor stacking context or drawer slide-in animation can move it
+ * off-screen. It owns no state: the caller decides which action is pending
+ * and what confirmation does.
  */
 export function ConfirmDialog({
   title,
@@ -19,7 +23,7 @@ export function ConfirmDialog({
   onCancel: () => void
   testId: string
 }) {
-  return (
+  return createPortal(
     <>
       <div className="drawer-backdrop" onClick={onCancel} />
       <div
@@ -27,8 +31,14 @@ export function ConfirmDialog({
         style={{
           left: '50%',
           right: 'auto',
-          transform: 'translateX(-50%)',
+          top: '50%',
+          bottom: 'auto',
+          transform: 'translate(-50%, -50%)',
+          animation: 'none',
           width: 'min(520px, 92vw)',
+          maxHeight: '88vh',
+          border: '1px solid var(--border-strong)',
+          borderRadius: 10,
           zIndex: 41,
         }}
         role="dialog"
@@ -38,7 +48,7 @@ export function ConfirmDialog({
         <div className="drawer-head">
           <h2>{title}</h2>
         </div>
-        <div className="card">
+        <div className="card" style={{ marginBottom: 12 }}>
           <div className="stage-body">{body}</div>
         </div>
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
@@ -50,6 +60,7 @@ export function ConfirmDialog({
           </button>
         </div>
       </div>
-    </>
+    </>,
+    document.body,
   )
 }

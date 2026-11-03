@@ -275,7 +275,8 @@ async def test_remote_ai_failure_yields_no_trade(clock, db_engine) -> None:
 
     record = await _workflow(clock, BrokenAI(), ScriptedCritic(), journal).run(state)
     assert record.status is DecisionStatus.FAILED
-    assert "local_ai" in (record.failure_reason or "")
+    # Named for the provider fault, not conflated with a deliberate hold.
+    assert "ai:" in (record.failure_reason or "")
     assert record.orders_generated == []
 
 

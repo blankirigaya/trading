@@ -4,6 +4,7 @@ from decimal import Decimal
 from sqlalchemy import Table
 
 from ai_trader.ai.base import AIProvider
+from ai_trader.ai.entry_plan import EntryPlanRequired
 from ai_trader.ai.jev import MockJevCritic, build_critic
 from ai_trader.ai.mock import MockAIProvider
 from ai_trader.ai.portfolio_manager import PortfolioManagerAgent, position_limits_text
@@ -553,14 +554,14 @@ class Container:
         # Routine reviews run on the cadence model when configured (falls back
         # to the main model); news intelligence keeps self.ai_provider.
         provider = RetryingAIProvider(
-            build_ai_provider(self.settings, self.ai_health, cadence=True),
+            EntryPlanRequired(build_ai_provider(self.settings, self.ai_health, cadence=True)),
             self.settings.ai_schema_max_retries,
         )
         # LIVE_SHADOW permanently injects the already-created PaperBroker, never UpstoxBroker.
         return ShadowReviewWorkflow(
             PortfolioManagerAgent(
                 provider,
-                "v11",
+                "v13",
                 position_limits=position_limits_text(
                     self.settings,
                     capital_cap_disabled=self.capital_cap_disabled,
@@ -579,4 +580,7 @@ class Container:
             ExecutionService(self.broker),
             self.journal,
             self.clock,
+            jev_min_entry_score=self.settings.jev_min_entry_score,
+            charge_rates=charge_rates_for(self.settings),
+            min_edge_cost_multiple=self.settings.min_edge_cost_multiple,
         )

@@ -10,6 +10,7 @@ from ai_trader.main import create_app
 def _client_with_live_shadow() -> TestClient:
     settings = Settings(
         app_mode="LIVE_SHADOW",
+        ai_provider="remote_openai_compatible",
         ai_base_url="http://trader:hunter2@192.168.1.25:8080/v1",
         ai_model="server-model-id",
         ai_api_key="top-secret-key",
@@ -57,12 +58,20 @@ def test_status_does_not_perform_inference_request() -> None:
 
 
 def test_status_reflects_recorded_health_without_new_requests() -> None:
+    from ai_trader.ai.remote_model import DEGRADED_AFTER_CONSECUTIVE_FAILURES
+
     client = _client_with_live_shadow()
-    client.app.state.container.ai_health.record_failure("inference request returned HTTP 503")
+    health = client.app.state.container.ai_health
+    # A single failure is dampened: the badge stays UNKNOWN, the error is recorded.
+    health.record_failure("inference request returned HTTP 503")
     body = client.get("/system/status").json()
-    assert body["ai_server_reachable"] is False
+    assert body["ai_server_reachable"] is None
     assert "503" in body["last_ai_error"]
     assert body["last_ai_failure_at"] is not None
+    # A sustained run with no success in between reports DEGRADED.
+    for _ in range(DEGRADED_AFTER_CONSECUTIVE_FAILURES - 1):
+        health.record_failure("inference request returned HTTP 503")
+    assert client.get("/system/status").json()["ai_server_reachable"] is False
 
 
 def test_health_endpoint_is_cheap() -> None:

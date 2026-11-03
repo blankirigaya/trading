@@ -2,6 +2,7 @@ import { useState } from 'react'
 
 import type { ClosedTradeRow, TradeRow } from '@/api/types'
 import { Badge, Empty, Stat } from '@/components/common/Primitives'
+import { PageHeader } from '@/components/common/PageHeader'
 import { useTrade, useTradeHistory, useTrades } from '@/hooks/useTrades'
 import {
   formatDateTime,
@@ -81,6 +82,11 @@ export function Trades() {
 
   return (
     <div>
+      <PageHeader
+        eyebrow="Paper trading"
+        title="Trades"
+        sub="Permanent record of closed paper rounds plus every simulated fill."
+      />
       <div className="card">
         <div className="card-title">
           <span>Closed trades &mdash; permanent record</span>
@@ -97,6 +103,7 @@ export function Trades() {
               <Stat label="Wins" value={history?.wins ?? 0} />
               <Stat label="Losses" value={history?.losses ?? 0} />
             </div>
+            <div className="table-scroll">
             <table>
               <thead>
                 <tr>
@@ -130,6 +137,7 @@ export function Trades() {
                 })}
               </tbody>
             </table>
+            </div>
           </>
         )}
       </div>
@@ -140,6 +148,7 @@ export function Trades() {
         </div>
       {!trades?.length ? <Empty>No simulated trades yet</Empty> : (
       <>
+      <div className="table-scroll">
       <table>
         <thead>
           <tr>
@@ -181,6 +190,7 @@ export function Trades() {
           ))}
         </tbody>
       </table>
+      </div>
       </>
       )}
       {selected ? <TradeDrawer tradeId={selected} onClose={() => setSelected(null)} /> : null}

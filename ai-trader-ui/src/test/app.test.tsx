@@ -243,6 +243,19 @@ function stubBackend(overrides: Record<string, unknown> = {}, performanceBody: u
         status: 200,
         headers: { 'Content-Type': 'application/json' },
       })
+    if (url.includes('/charges/schedule'))
+      return json({
+        enabled: true,
+        rates: {
+          brokerage_pct: '0.0003',
+          brokerage_cap_inr: '20',
+          stt_sell_pct: '0.00025',
+          exchange_pct: '0.0000297',
+          sebi_pct: '0.000001',
+          stamp_duty_buy_pct: '0.00003',
+          gst_pct: '0.18',
+        },
+      })
     if (url.includes('/system/status')) return json({ ...statusPayload, ...overrides })
     if (url.includes('/events/recent')) return json([])
     if (url.includes('/portfolio')) return json({ ...overrides })
@@ -282,6 +295,9 @@ function stubBackend(overrides: Record<string, unknown> = {}, performanceBody: u
     if (url.includes('/performance')) return json(performanceBody)
     if (url.endsWith('/bots')) return json(botsBody)
     if (url.includes('/positions')) return json([])
+    if (url.includes('/control/review')) {
+      return json({ requested: true, decision_id: 'manual-review-1' })
+    }
     if (url.includes('/control/kill-switch'))
       return json({ kill_switch_state: true, live_order_execution: false })
     if (url.includes('/control/universe')) {
@@ -378,6 +394,21 @@ describe('App shell', () => {
     )
   })
 
+  it('requests an AI review from the dashboard after confirmation', async () => {
+    const { fetchMock } = stubBackend()
+    renderApp('/')
+    await userEvent.click(await screen.findByTestId('request-review'))
+    expect(screen.getByTestId('confirm-review')).toBeInTheDocument()
+    await userEvent.click(screen.getByTestId('confirm-button'))
+
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some((call) => String(call[0]).includes('/control/review')),
+      ).toBe(true),
+    )
+    await waitFor(() => expect(screen.getByTestId('review-requested')).toBeInTheDocument())
+  })
+
   it('shows BACKEND OFFLINE without crashing when the API is unreachable', async () => {
     vi.stubGlobal(
       'fetch',
@@ -416,6 +447,22 @@ describe('App shell', () => {
     const link = await screen.findByText('Decisions')
     await userEvent.click(link)
     await waitFor(() => expect(screen.getByText(/AI decision journal/i)).toBeInTheDocument())
+  })
+
+  it('navigates to the charts page from the sidebar', async () => {
+    stubBackend()
+    renderApp('/')
+    const link = await screen.findByText('Charts')
+    await userEvent.click(link)
+    await waitFor(() => expect(screen.getByText('Trade charts')).toBeInTheDocument())
+  })
+
+  it('renders the trade charts workspace with real backend data only', async () => {
+    stubBackend()
+    renderApp('/charts')
+    await waitFor(() => expect(screen.getByText('Symbol & timeframe')).toBeInTheDocument())
+    // No candles, no fills, no invented history — honest empty states instead.
+    expect(screen.getByText('Trade history')).toBeInTheDocument()
   })
 })
 

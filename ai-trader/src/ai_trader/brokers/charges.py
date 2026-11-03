@@ -120,3 +120,89 @@ def compute_charges(
         stamp_duty=stamp_duty,
         gst=gst,
     )
+
+
+def round_trip_cost(
+    entry_price: Decimal,
+    exit_price: Decimal,
+    quantity: int,
+    rates: ChargeRates | None = None,
+) -> Decimal:
+    """Total charges for buying ``quantity`` at ``entry_price`` and selling at ``exit_price``.
+
+    Prices are per share and quantity is a whole share count, so turnover is
+    exact in rupees; the result is paise-quantized by ``compute_charges``.
+    """
+    if quantity <= 0:
+        return ZERO
+    schedule = rates or ChargeRates()
+    return (
+        compute_charges(OrderSide.BUY, entry_price * quantity, schedule).total
+        + compute_charges(OrderSide.SELL, exit_price * quantity, schedule).total
+    )
+
+
+@dataclass(frozen=True)
+class EntryEdge:
+    """Whether a proposed entry clears its own round-trip cost by a required multiple.
+
+    This is deliberately arithmetic, not judgement: a target the model states
+    must pay for the two fills that would realise it. ``multiple`` is ``None``
+    when the edge cannot be computed, which is never treated as a pass by the
+    caller — it is reported separately so an unverifiable plan stays visible.
+    """
+
+    expected_gross_inr: Decimal
+    round_trip_cost_inr: Decimal
+    multiple: Decimal | None
+    required_multiple: Decimal
+    allowed: bool
+
+    @property
+    def required_gross_inr(self) -> Decimal:
+        return (self.round_trip_cost_inr * self.required_multiple).quantize(
+            PAISE, rounding=ROUND_HALF_UP
+        )
+
+
+def evaluate_entry_edge(
+    *,
+    entry_price: Decimal,
+    target_price: Decimal | None,
+    quantity: int,
+    rates: ChargeRates | None,
+    required_multiple: Decimal,
+) -> EntryEdge:
+    """Compare a stated target's gross gain against the cost of the round trip.
+
+    A long entry bought at ``entry_price`` and sold at ``target_price`` earns
+    ``(target - entry) * quantity`` before costs. If that does not cover
+    ``required_multiple`` times the charges, the trade can only ever be a
+    donation to the broker, so it is refused before any order is built.
+    """
+    zero = ZERO
+    if target_price is None or quantity <= 0 or entry_price <= 0:
+        return EntryEdge(
+            expected_gross_inr=zero,
+            round_trip_cost_inr=zero,
+            multiple=None,
+            required_multiple=required_multiple,
+            allowed=True,
+        )
+    gross = (target_price - entry_price) * quantity
+    charges = round_trip_cost(entry_price, target_price, quantity, rates)
+    if charges <= 0:
+        return EntryEdge(
+            expected_gross_inr=gross,
+            round_trip_cost_inr=charges,
+            multiple=None,
+            required_multiple=required_multiple,
+            allowed=True,
+        )
+    return EntryEdge(
+        expected_gross_inr=gross,
+        round_trip_cost_inr=charges,
+        multiple=gross / charges,
+        required_multiple=required_multiple,
+        allowed=gross >= charges * required_multiple,
+    )

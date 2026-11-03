@@ -13,6 +13,10 @@ logger = logging.getLogger(__name__)
 
 
 class JevCritic(ABC):
+    """A real assessment feeds the entry gate; a stand-in never blocks trades."""
+
+    assesses: bool = True
+
     @abstractmethod
     async def assess(
         self, proposal: PortfolioDecision, news: NewsReviewBundle | None = None
@@ -49,7 +53,10 @@ class DisabledJevCritic(JevCritic):
 
     Agrees with everything and records the stage as SKIPPED, so the journal
     shows the critique was deliberately not performed rather than faked.
+    Never gates entries: with no assessment there is nothing to judge by.
     """
+
+    assesses = False
 
     async def assess(
         self, proposal: PortfolioDecision, news: NewsReviewBundle | None = None

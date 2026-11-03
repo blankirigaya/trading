@@ -185,7 +185,7 @@ async def test_jev_challenge_triggers_reconsideration_and_keeps_both(clock, sql_
     ai = ScriptedAI([_decision(), _decision("6001.00")])
     critic = ScriptedCritic(
         CriticAssessment(
-            score=0.4,
+            score=0.75,
             agrees=False,
             disagreement_signals=["allocation too large"],
             critique="Halve it.",
@@ -198,6 +198,8 @@ async def test_jev_challenge_triggers_reconsideration_and_keeps_both(clock, sql_
     assert record.reconsideration_performed is True
     # The reconsidered decision went on to execute, so EXECUTED is the terminal status;
     # the RECONSIDERED stage is preserved explicitly via the two provenance flags.
+    # (Score 0.75 clears the 0.65 Jev entry gate; the challenge path itself is
+    # what this test exercises, not the gate — see test_jev_entry_gate.py.)
     assert record.status is DecisionStatus.EXECUTED
     assert ai.calls == 2
 
@@ -316,7 +318,8 @@ async def test_ai_failure_journals_failure_without_trade(clock, sql_journal) -> 
         sql_journal,
     ).run(_state(clock))
     assert record.status is DecisionStatus.FAILED
-    assert "local_ai" in (record.failure_reason or "")
+    # Named for the provider fault, not conflated with a deliberate hold.
+    assert "ai:" in (record.failure_reason or "")
     assert record.orders_generated == []
 
 

@@ -3,6 +3,7 @@ import { useState } from 'react'
 import type { DecisionRecord } from '@/api/types'
 import { Badge, Empty } from '@/components/common/Primitives'
 import { DecisionDetail } from '@/components/decisions/DecisionDetail'
+import { PageHeader } from '@/components/common/PageHeader'
 import { useDecisions } from '@/hooks/useDecisions'
 import { formatDateTime, formatInr, formatPercent, formatSignedInr } from '@/utils/format'
 
@@ -50,6 +51,11 @@ export function Decisions() {
 
   return (
     <div>
+      <PageHeader
+        eyebrow="AI intelligence"
+        title="Decisions"
+        sub="Every AI proposal, Jev challenge, safety verdict, and paper outcome — journalled."
+      />
       <div className="card">
         <div className="card-title">
           <span>AI decision journal</span>
@@ -97,6 +103,7 @@ export function Decisions() {
         {rows.length === 0 ? (
           <Empty>No decisions match these filters</Empty>
         ) : (
+          <div className="table-scroll">
           <table>
             <thead>
               <tr>
@@ -156,6 +163,7 @@ export function Decisions() {
               })}
             </tbody>
           </table>
+          </div>
         )}
       </div>
 

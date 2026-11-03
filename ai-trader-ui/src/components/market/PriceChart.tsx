@@ -47,24 +47,29 @@ export function PriceChart({
     if (!host.current) return
     const instance = createChart(host.current, {
       layout: {
-        background: { color: '#0e141d' },
-        textColor: '#8496a8',
+        background: { color: '#0C1420' },
+        textColor: '#8495AA',
         fontSize: 11,
+        fontFamily: "'JetBrains Mono', monospace",
       },
       grid: {
-        vertLines: { color: '#161f2b' },
-        horzLines: { color: '#161f2b' },
+        vertLines: { color: '#151F2E' },
+        horzLines: { color: '#151F2E' },
       },
-      rightPriceScale: { borderColor: '#1e2a38' },
-      timeScale: { borderColor: '#1e2a38', timeVisible: true },
-      height: 320,
+      rightPriceScale: { borderColor: '#243247' },
+      timeScale: { borderColor: '#243247', timeVisible: true },
+      crosshair: {
+        vertLine: { color: '#398BFF', labelBackgroundColor: '#398BFF' },
+        horzLine: { color: '#398BFF', labelBackgroundColor: '#398BFF' },
+      },
+      height: 340,
     })
     const candleSeries = instance.addCandlestickSeries({
-      upColor: '#35c88a',
-      downColor: '#f0576a',
+      upColor: '#00D69A',
+      downColor: '#FF5364',
       borderVisible: false,
-      wickUpColor: '#35c88a',
-      wickDownColor: '#f0576a',
+      wickUpColor: '#00D69A',
+      wickDownColor: '#FF5364',
     })
     chart.current = instance
     series.current = candleSeries

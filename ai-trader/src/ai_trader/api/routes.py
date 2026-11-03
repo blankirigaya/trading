@@ -318,6 +318,33 @@ async def bots(request: Request) -> list[dict[str, object]]:
     return bots
 
 
+@router.get("/charges/schedule")
+async def charges_schedule(request: Request) -> dict[str, object]:
+    """Active paper charge schedule so the UI can estimate exit costs.
+
+    Read-only reporting: rates come from settings, never from clients. The
+    holdings table subtracts this estimate from unrealized P&L so green paint
+    is never mistaken for bankable profit.
+    """
+    from ai_trader.brokers.charges import charge_rates_for
+
+    rates = charge_rates_for(container(request).settings)
+    if rates is None:
+        return {"enabled": False, "rates": None}
+    return {
+        "enabled": True,
+        "rates": {
+            "brokerage_pct": str(rates.brokerage_pct),
+            "brokerage_cap_inr": str(rates.brokerage_cap_inr),
+            "stt_sell_pct": str(rates.stt_sell_pct),
+            "exchange_pct": str(rates.exchange_pct),
+            "sebi_pct": str(rates.sebi_pct),
+            "stamp_duty_buy_pct": str(rates.stamp_duty_buy_pct),
+            "gst_pct": str(rates.gst_pct),
+        },
+    }
+
+
 @router.get("/portfolio")
 async def portfolio(request: Request) -> dict[str, object]:
     app = container(request)

@@ -3,6 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 
 import { api } from '@/api/client'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
+import { PageHeader } from '@/components/common/PageHeader'
 import { Badge, Empty, StateBadge } from '@/components/common/Primitives'
 import { useLiveEvents } from '@/store/liveEvents'
 import { useMarketStatus, useSystemStatus } from '@/hooks/useSystemStatus'
@@ -50,6 +51,11 @@ export function System() {
 
   return (
     <div>
+      <PageHeader
+        eyebrow="Control"
+        title="System"
+        sub="Runtime state and safe controls. Observer only — no order controls exist by design."
+      />
       <div className="card">
         <div className="card-title">
           <span>Runtime</span>

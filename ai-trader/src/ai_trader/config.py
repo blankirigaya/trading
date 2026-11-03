@@ -31,6 +31,12 @@ class Settings(BaseSettings):
     paper_sebi_pct: Decimal = Decimal("0.000001")
     paper_stamp_duty_buy_pct: Decimal = Decimal("0.00003")
     paper_gst_pct: Decimal = Decimal("0.18")
+    # Minimum-edge entry bar: a proposed target must earn at least this many
+    # times the round-trip charges that realising it would cost. Purely
+    # arithmetic — it never consults the model. 1.0 would merely break even
+    # before slippage, so the default keeps a real margin. Tune with
+    # MIN_EDGE_COST_MULTIPLE; set 0 to disable.
+    min_edge_cost_multiple: Decimal = Decimal("2.5")
     execution_broker: str = "paper"
     live_trading_approved: bool = False
     live_allowed_symbols: tuple[str, ...] = ("NSE:INFY-EQ",)
@@ -117,6 +123,11 @@ class Settings(BaseSettings):
     # model. Gated by ai_max_sonnet_escalations_per_day.
     sonnet_escalation_enabled: bool = True
     ai_max_sonnet_escalations_per_day: int = 20
+    # Jev entry bar: an OPEN or INCREASE_POSITION proposal only reaches the
+    # broker when the critic's score for the decision is at least this high.
+    # Weak agrees used to sail through and bleed on charges; exits are never
+    # gated, so winners stay easy to bank. Tune with JEV_MIN_ENTRY_SCORE.
+    jev_min_entry_score: float = 0.65
     portfolio_review_interval_seconds: int = 60
     # Daily Bedrock spend cap in USD. When set (and per-model rates are
     # configured so spend is measurable), cadence and news reviews pause for
@@ -370,6 +381,20 @@ class Settings(BaseSettings):
     def _non_negative_escalation_cap(cls, value: int) -> int:
         if value < 0:
             raise ValueError("AI_MAX_SONNET_ESCALATIONS_PER_DAY cannot be negative")
+        return value
+
+    @field_validator("jev_min_entry_score")
+    @classmethod
+    def _entry_score_in_unit_interval(cls, value: float) -> float:
+        if not 0 <= value <= 1:
+            raise ValueError("JEV_MIN_ENTRY_SCORE must be between 0 and 1")
+        return value
+
+    @field_validator("min_edge_cost_multiple")
+    @classmethod
+    def _edge_multiple_not_negative(cls, value: Decimal) -> Decimal:
+        if value < 0:
+            raise ValueError("MIN_EDGE_COST_MULTIPLE must not be negative")
         return value
 
     @field_validator("live_trading_start_ist", "live_trading_end_ist")

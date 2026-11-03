@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 
 from ai_trader.ai.base import AIProvider
@@ -62,6 +64,70 @@ def position_limits_text(
     )
 
 
+@dataclass(frozen=True)
+class OpenPositionBrief:
+    """One live position, pre-digested for the exit review.
+
+    The manager sees raw books (symbol, quantity, average entry) plus a board
+    of live prices, which forces it to recompute winners from scratch every
+    review and biases it toward hunting entries. This block does the arithmetic
+    up front so the exit decision is explicit: bank, reduce, or hold with a
+    fresh reason. Unrealized figures are gross of exit charges; the prompt
+    tells the manager to judge against economics net of them.
+    """
+
+    symbol: str
+    quantity: int
+    average_entry_price: Decimal
+    last_price: Decimal | None
+    unrealized_inr: Decimal | None
+    unrealized_pct: Decimal | None
+    held_minutes: int | None
+    target_price: Decimal | None
+    invalidation_price: Decimal | None
+    entry_thesis: str | None
+
+
+def render_open_position_brief(positions: list[OpenPositionBrief]) -> str:
+    """Prompt block listing live positions for the exit-first review."""
+    if not positions:
+        return ""
+    lines = ["Open positions (yours — review each for exit BEFORE hunting new entries):"]
+    for position in positions:
+        if position.last_price is None or position.unrealized_inr is None:
+            mark = "no live mark; exit only on a fresh price, never blind"
+        else:
+            pct = (
+                f"{position.unrealized_pct:+.2f}%"
+                if position.unrealized_pct is not None
+                else "n/a"
+            )
+            mark = (
+                f"LTP={position.last_price:.2f} "
+                f"unrealized={position.unrealized_inr:+.2f} INR ({pct})"
+            )
+        age = (
+            f"held {position.held_minutes}m"
+            if position.held_minutes is not None
+            else "held age unknown"
+        )
+        plan_bits = []
+        if position.target_price is not None:
+            plan_bits.append(f"target {position.target_price:.2f}")
+        if position.invalidation_price is not None:
+            plan_bits.append(f"invalidation {position.invalidation_price:.2f}")
+        plan = "; ".join(plan_bits) if plan_bits else "no recorded entry plan"
+        thesis = (position.entry_thesis or "").strip()
+        if len(thesis) > 200:
+            thesis = thesis[:197] + "..."
+        lines.append(
+            f"  {position.symbol}: LONG {position.quantity} @ avg {position.average_entry_price:.2f}; "
+            f"{mark}; {age}; entry plan: {plan}"
+            + (f"; thesis: {thesis}" if thesis else "")
+        )
+    return "\n".join(lines) + "\n"
+
+
 class PortfolioManagerAgent:
     def __init__(
         self,
@@ -96,9 +162,11 @@ class PortfolioManagerAgent:
         news: NewsReviewBundle | None = None,
         *,
         board: list[MarketState] | None = None,
+        position_brief: str = "",
     ) -> tuple[PortfolioDecision, ProviderMetadata]:
         return await self._complete(
-            self._context(tick, portfolio, news, board=board), prompt=self._select_prompt(news)
+            self._context(tick, portfolio, news, board=board, position_brief=position_brief),
+            prompt=self._select_prompt(news),
         )
 
     async def reconsider(
@@ -137,11 +205,14 @@ class PortfolioManagerAgent:
         news: NewsReviewBundle | None,
         *,
         board: list[MarketState] | None = None,
+        position_brief: str = "",
     ) -> str:
         board_block = self._board_block(board)
+        brief_block = f"{position_brief}" if position_brief else ""
         return (
             f"Market tick: {tick.model_dump_json()}\n"
             f"Portfolio: {portfolio.model_dump_json()}\n"
+            f"{brief_block}"
             f"{board_block}"
             f"{self._news_block(news, portfolio)}"
             "Return only the validated portfolio decision schema."
