@@ -31,7 +31,7 @@ def _meta() -> ProviderMetadata:
     )
 
 
-def _entry(target: str | None) -> PortfolioDecision:
+def _entry(target: str | None, invalidation: str | None = "1490") -> PortfolioDecision:
     return PortfolioDecision(
         cash_percent=0.0,
         allocations=[],
@@ -44,6 +44,7 @@ def _entry(target: str | None) -> PortfolioDecision:
                 capital_allocation_inr=Decimal("20000"),
                 quantity_shares=10,
                 target_price=Decimal(target) if target is not None else None,
+                invalidation_price=Decimal(invalidation) if invalidation is not None else None,
                 confidence=0.7,
                 thesis="board pick",
             )
@@ -121,6 +122,15 @@ async def test_entry_with_target_passes() -> None:
         "s", "u", PortfolioDecision, prompt_name="p", prompt_version="v13"
     )
     assert decision.proposals[0].target_price == Decimal("1520")
+
+
+async def test_entry_without_invalidation_is_rejected() -> None:
+    wrapped = EntryPlanRequired(ScriptedProvider([_entry("1520", invalidation=None)]))
+    with pytest.raises(SchemaValidationError) as raised:
+        await wrapped.structured_completion(
+            "s", "u", PortfolioDecision, prompt_name="p", prompt_version="v14"
+        )
+    assert "invalidation_price" in raised.value.detail
 
 
 @pytest.mark.parametrize("decision", [_exit(), _hold()])

@@ -34,6 +34,7 @@ from ai_trader.persistence.control_models import ensure_control_tables
 from ai_trader.persistence.control_store import ControlStore
 from ai_trader.persistence.database import create_database_engine
 from ai_trader.persistence.repositories import SqlDecisionJournal
+from ai_trader.risk.entry_plan import RiskRules
 from ai_trader.safety.envelope import KillSwitch, SafetyEnvelope
 
 GATE_MARKET = "market test"
@@ -144,7 +145,7 @@ async def run_once_shadow(
     workflow = ShadowReviewWorkflow(
         PortfolioManagerAgent(
             provider,
-            "v13",
+            "v14",
             position_limits=position_limits_text(
                 settings,
                 capital_cap_disabled=capital_cap_disabled,
@@ -158,8 +159,7 @@ async def run_once_shadow(
         journal,
         clock,
         jev_min_entry_score=settings.jev_min_entry_score,
-        charge_rates=charge_rates_for(settings),
-        min_edge_cost_multiple=settings.min_edge_cost_multiple,
+        risk_rules=RiskRules.from_settings(settings),
     )
     try:
         record = await workflow.run(state, board=board)

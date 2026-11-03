@@ -234,7 +234,7 @@ def test_no_breach_leaves_position_alone(clock: Any) -> None:
     broker = PaperBroker(Decimal("100000"), clock, {"GAIL": Decimal("176.00")})
     _hold(broker, "GAIL", 100, "175.00")
     workflow = _workflow(clock, ScriptedAI(fail=True), broker, FakeLedger())
-    asyncio.run(workflow._enforce_invalidations([_brief(last_price=Decimal("176.00"))], "snap"))
+    asyncio.run(workflow._enforce_exits([_brief(last_price=Decimal("176.00"))], "snap"))
     assert broker.positions["GAIL"].quantity == 100
 
 
@@ -245,7 +245,7 @@ def test_missing_mark_never_closes_blind(clock: Any) -> None:
     _hold(broker, "GAIL", 100, "175.00")
     workflow = _workflow(clock, ScriptedAI(fail=True), broker, FakeLedger())
     brief = _brief(last_price=None, unrealized_inr=None, unrealized_pct=None)
-    asyncio.run(workflow._enforce_invalidations([brief], "snap"))
+    asyncio.run(workflow._enforce_exits([brief], "snap"))
     assert broker.positions["GAIL"].quantity == 100
 
 
@@ -255,7 +255,7 @@ def test_missing_invalidation_never_invents_a_level(clock: Any) -> None:
     broker = PaperBroker(Decimal("100000"), clock, {"GAIL": Decimal("150.00")})
     _hold(broker, "GAIL", 100, "175.00")
     workflow = _workflow(clock, ScriptedAI(fail=True), broker, FakeLedger())
-    asyncio.run(workflow._enforce_invalidations([_brief(invalidation_price=None)], "snap"))
+    asyncio.run(workflow._enforce_exits([_brief(invalidation_price=None)], "snap"))
     assert broker.positions["GAIL"].quantity == 100
 
 
@@ -267,5 +267,5 @@ def test_kill_switch_holds_the_guardrail(clock: Any) -> None:
     workflow = _workflow(clock, ScriptedAI(fail=True), broker, FakeLedger())
     assert isinstance(workflow.safety.kill_switch, KillSwitch)
     workflow.safety.kill_switch.enabled = True
-    asyncio.run(workflow._enforce_invalidations([_brief()], "snap"))
+    asyncio.run(workflow._enforce_exits([_brief()], "snap"))
     assert broker.positions["GAIL"].quantity == 100

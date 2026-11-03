@@ -182,7 +182,7 @@ async def test_one_shadow_run_persists_three_stages_and_formats_summary(
                 side=OrderSide.BUY,
                 capital_allocation_inr=Decimal("15002.50"),
                 target_price=Decimal("1520.00"),
-                invalidation_price=Decimal("1490.00"),
+                invalidation_price=Decimal("1495.00"),
                 confidence=0.71,
                 thesis="Momentum with volume confirmation.",
                 evidence=["live V3 LTP 1500.25"],

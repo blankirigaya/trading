@@ -45,6 +45,7 @@ from ai_trader.persistence.control_store import ControlStore
 from ai_trader.persistence.database import create_database_engine
 from ai_trader.persistence.models import Base
 from ai_trader.persistence.news_repository import NewsRepository
+from ai_trader.risk.entry_plan import RiskRules
 from ai_trader.safety.envelope import KillSwitch, SafetyEnvelope
 
 
@@ -561,7 +562,7 @@ class Container:
         return ShadowReviewWorkflow(
             PortfolioManagerAgent(
                 provider,
-                "v13",
+                "v14",
                 position_limits=position_limits_text(
                     self.settings,
                     capital_cap_disabled=self.capital_cap_disabled,
@@ -581,6 +582,5 @@ class Container:
             self.journal,
             self.clock,
             jev_min_entry_score=self.settings.jev_min_entry_score,
-            charge_rates=charge_rates_for(self.settings),
-            min_edge_cost_multiple=self.settings.min_edge_cost_multiple,
+            risk_rules=RiskRules.from_settings(self.settings),
         )

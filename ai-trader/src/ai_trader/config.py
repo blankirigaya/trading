@@ -37,6 +37,27 @@ class Settings(BaseSettings):
     # before slippage, so the default keeps a real margin. Tune with
     # MIN_EDGE_COST_MULTIPLE; set 0 to disable.
     min_edge_cost_multiple: Decimal = Decimal("2.5")
+    # Minimum reward/risk for an entry: distance to target must be at least
+    # this many times distance to invalidation, so a loser is always smaller
+    # than a winner. Set 0 to disable.
+    min_reward_risk: Decimal = Decimal("2.0")
+    # Risk-based sizing: the most a single trade's stop-out may cost, as a
+    # percentage of current equity. The model may size smaller; never larger.
+    # Set 0 to leave sizing entirely to the model.
+    risk_per_trade_pct: Decimal = Decimal("0.5")
+    # Protective exits (deterministic, evaluated every review):
+    # trailing stop distance in ATRs behind the position's peak price...
+    trail_atr_multiple: Decimal = Decimal("0.5")
+    # ...and, when no ATR is available (FYERS publishes only the day's OHLC),
+    # the fraction of the peak gain the trail is allowed to give back.
+    trail_give_back_fraction: Decimal = Decimal("0.5")
+    # Close a stagnant small winner after this many minutes...
+    time_stop_minutes: int = 90
+    # ...when its unrealized gain is positive but below this percentage.
+    time_stop_min_gain_pct: Decimal = Decimal("0.25")
+    # Do not pay the exit leg to bank a gain smaller than this multiple of that
+    # leg's cost; losers and invalidations are never blocked by this floor.
+    exit_floor_cost_multiple: Decimal = Decimal("2.5")
     execution_broker: str = "paper"
     live_trading_approved: bool = False
     live_allowed_symbols: tuple[str, ...] = ("NSE:INFY-EQ",)
@@ -395,6 +416,27 @@ class Settings(BaseSettings):
     def _edge_multiple_not_negative(cls, value: Decimal) -> Decimal:
         if value < 0:
             raise ValueError("MIN_EDGE_COST_MULTIPLE must not be negative")
+        return value
+
+    @field_validator("min_reward_risk", "risk_per_trade_pct", "trail_atr_multiple")
+    @classmethod
+    def _risk_setting_not_negative(cls, value: Decimal) -> Decimal:
+        if value < 0:
+            raise ValueError("risk settings must not be negative")
+        return value
+
+    @field_validator("risk_per_trade_pct")
+    @classmethod
+    def _risk_pct_within_equity(cls, value: Decimal) -> Decimal:
+        if value > 100:
+            raise ValueError("RISK_PER_TRADE_PCT cannot exceed 100")
+        return value
+
+    @field_validator("time_stop_minutes")
+    @classmethod
+    def _time_stop_not_negative(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("TIME_STOP_MINUTES must not be negative")
         return value
 
     @field_validator("live_trading_start_ist", "live_trading_end_ist")

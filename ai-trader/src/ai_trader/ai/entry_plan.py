@@ -29,11 +29,11 @@ _ENTRY_ACTIONS = frozenset(
 
 
 class EntryPlanRequired(AIProvider):
-    """Provider decorator: entry proposals must state target_price.
+    """Provider decorator: entry proposals must state target_price and invalidation_price.
 
-    ``invalidation_price`` is deliberately *not* required yet. Only 30% of
-    historical entries carry one, so demanding it now would trade a lot of
-    review cycles for a field nothing consumes until risk-based sizing lands.
+    Both are load-bearing now: the target feeds the cost and reward/risk gates,
+    and the invalidation feeds risk-based sizing and the hard exit. A plan
+    without them cannot be sized or checked, so it is never passed through.
     """
 
     def __init__(self, provider: AIProvider) -> None:
@@ -79,5 +79,10 @@ class EntryPlanRequired(AIProvider):
                 missing.append(
                     f"proposals.{index}.target_price: required for "
                     f"{proposal.action.value}; the entry cannot be cost-checked without it"
+                )
+            if proposal.invalidation_price is None:
+                missing.append(
+                    f"proposals.{index}.invalidation_price: required for "
+                    f"{proposal.action.value}; the position cannot be risk-sized without it"
                 )
         return missing

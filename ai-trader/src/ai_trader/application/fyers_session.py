@@ -56,6 +56,7 @@ from ai_trader.persistence.news_repository import NewsRepository
 from ai_trader.persistence.repositories import SqlDecisionJournal, ensure_journal_tables
 from ai_trader.persistence.trade_ledger import TradeLedger
 from ai_trader.persistence.trade_models import ensure_trade_tables
+from ai_trader.risk.entry_plan import RiskRules
 from ai_trader.safety.envelope import KillSwitch, SafetyEnvelope
 
 logger = logging.getLogger(__name__)
@@ -869,7 +870,7 @@ def build_session(
         )
         manager = PortfolioManagerAgent(
             provider,
-            "v13",
+            "v14",
             position_limits=position_limits_text(
                 settings,
                 capital_cap_disabled=capital_cap_disabled,
@@ -895,8 +896,7 @@ def build_session(
             event_sink=event_sink,
             latency_sink=_latency_sink(news_repository) if settings.news_enabled else None,
             jev_min_entry_score=settings.jev_min_entry_score,
-            charge_rates=charge_rates_for(settings),
-            min_edge_cost_multiple=settings.min_edge_cost_multiple,
+            risk_rules=RiskRules.from_settings(settings),
         )
         # Sonnet twin of the shard workflow for news-triggered escalation:
         # same book, safety, execution and journal, only the manager's model
@@ -909,7 +909,7 @@ def build_session(
                 RetryingAIProvider(
                     EntryPlanRequired(sonnet_provider), settings.ai_schema_max_retries
                 ),
-                "v13",
+                "v14",
                 position_limits=position_limits_text(
                     settings,
                     capital_cap_disabled=capital_cap_disabled,
@@ -925,8 +925,7 @@ def build_session(
             event_sink=event_sink,
             latency_sink=_latency_sink(news_repository) if settings.news_enabled else None,
             jev_min_entry_score=settings.jev_min_entry_score,
-            charge_rates=charge_rates_for(settings),
-            min_edge_cost_multiple=settings.min_edge_cost_multiple,
+            risk_rules=RiskRules.from_settings(settings),
         )
         shards.append(
             ReviewShard(

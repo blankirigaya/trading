@@ -228,6 +228,7 @@ class PortfolioManagerAgent:
         """
         if not board:
             return ""
+        from ai_trader.screening.indicators import atr
         from ai_trader.screening.screener import rank_candidates
 
         shortlist = {candidate.symbol for candidate in rank_candidates(board)}
@@ -241,10 +242,27 @@ class PortfolioManagerAgent:
                 else ""
             )
             prev = f" prev_close={state.previous_close}" if state.previous_close is not None else ""
+            atr_value = atr(state.recent_1m_candles or ([candle] if candle else []))
+            if atr_value is not None:
+                volatility = f" ATR={atr_value.quantize(Decimal('0.01'))}"
+            elif candle is not None and state.previous_close:
+                # FYERS publishes only the day's OHLC, so normalise on the
+                # session range rather than inventing an ATR.
+                day_range = candle.high - candle.low
+                if day_range > 0:
+                    range_pct = day_range / state.previous_close * Decimal(100)
+                    volatility = (
+                        f" range={day_range.quantize(Decimal('0.01'))}"
+                        f" ({range_pct.quantize(Decimal('0.01'))}%)"
+                    )
+                else:
+                    volatility = ""
+            else:
+                volatility = ""
             star = " ★" if state.instrument.symbol in shortlist else ""
             lines.append(
                 f"  {state.instrument.symbol}: LTP={state.last_price}{prev}{ohlc}"
-                f" as_of={state.timestamp.isoformat()}{star}"
+                f"{volatility} as_of={state.timestamp.isoformat()}{star}"
             )
         lines.append(
             "Survey the whole board and propose at most one position in the single"

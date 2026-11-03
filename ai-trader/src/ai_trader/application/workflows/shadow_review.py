@@ -13,7 +13,7 @@ from ai_trader.ai.portfolio_manager import (
 )
 from ai_trader.ai.remote_model import RemoteAIUnavailable
 from ai_trader.ai.retries import StructuredCompletionFailed
-from ai_trader.brokers.charges import ChargeRates, evaluate_entry_edge
+from ai_trader.brokers.charges import compute_charges
 from ai_trader.brokers.paper import PaperBroker
 from ai_trader.domain.common import Clock
 from ai_trader.domain.decisions import (
@@ -30,7 +30,14 @@ from ai_trader.domain.portfolio import PortfolioState
 from ai_trader.execution.service import ExecutionAdjustmentRequired, ExecutionService
 from ai_trader.journal.service import DecisionJournal, DecisionRecord
 from ai_trader.news.review_context import NewsReviewBundle
+from ai_trader.risk.entry_plan import (
+    RiskRules,
+    RiskSizing,
+    evaluate_entry_plan,
+    size_entry_by_risk,
+)
 from ai_trader.safety.envelope import SafetyEnvelope
+from ai_trader.screening.indicators import atr
 
 logger = logging.getLogger(__name__)
 
@@ -61,8 +68,7 @@ class ShadowReviewWorkflow:
         event_sink: Callable[..., None] | None = None,
         latency_sink: Callable[[str, str, datetime], None] | None = None,
         jev_min_entry_score: float = 0.65,
-        charge_rates: ChargeRates | None = None,
-        min_edge_cost_multiple: Decimal = Decimal("2.5"),
+        risk_rules: RiskRules | None = None,
     ) -> None:
         self.manager = manager
         self.critic = critic
@@ -71,8 +77,12 @@ class ShadowReviewWorkflow:
         self.execution = execution
         self.journal = journal
         self.jev_min_entry_score = jev_min_entry_score
-        self.charge_rates = charge_rates
-        self.min_edge_cost_multiple = min_edge_cost_multiple
+        self.risk_rules = risk_rules or RiskRules()
+        # Highest live price seen per open symbol since this workflow started.
+        # Trailing stops need a peak; an in-memory map is enough because a
+        # restart simply re-seeds the trail at the current price (never worse
+        # than no trail at all).
+        self._peaks: dict[str, Decimal] = {}
         self.clock = clock
         self.event_sink = event_sink
         # (stage, analysis_id, timestamp) so news latency can be measured end to end.
@@ -255,29 +265,41 @@ class ShadowReviewWorkflow:
             )
         return views
 
-    async def _enforce_invalidations(
-        self, views: list[OpenPositionBrief], snapshot_id: str
+    async def _enforce_exits(
+        self,
+        views: list[OpenPositionBrief],
+        snapshot_id: str,
+        atr_by_symbol: Mapping[str, Decimal] | None = None,
     ) -> None:
-        """Close positions trading at or below their AI-set invalidation level.
+        """Apply deterministic exits before any AI judgment.
 
-        Runs before any AI judgment so a failed or indecisive review cannot
-        strand a broken trade. No invalidation recorded, no live mark, or an
-        engaged kill switch all mean hands off: never invent an exit level and
-        never trade blind. Closes go straight to the paper broker (exits only
-        ever reduce exposure, so no safety check); failures are logged and the
-        review continues so one stuck symbol cannot block the board.
+        Three rules, in order of priority, all evaluated from live marks:
+
+        * **invalidation** — the AI's own thesis-break level, hard;
+        * **trailing stop** — once a position is in profit, close it after it
+          falls ``trail_atr_multiple`` ATRs from its peak, locking gains instead
+          of giving them back;
+        * **time stop** — close a stagnant small winner that has gone nowhere
+          for ``time_stop_minutes``.
+
+        Losses are never closed by the trail or time stop: an unbroken trade
+        keeps its full stop distance, so volatility cannot turn a normal
+        pullback into a realised loss. No mark, no ATR, or an engaged kill
+        switch all mean hands off rather than inventing an exit level.
         """
         if getattr(self.safety.kill_switch, "enabled", False):
             return
+        atrs = atr_by_symbol or {}
         for view in views:
-            if view.invalidation_price is None:
+            price = view.last_price
+            if price is None or price <= 0:
                 continue
-            if view.last_price is None or view.last_price <= 0:
+            decision = self._exit_decision(view, price, atrs.get(view.symbol.upper()))
+            if decision is None:
                 continue
-            if view.last_price > view.invalidation_price:
-                continue
+            kind, reason = decision
             proposal = TradeProposal(
-                proposal_id=f"guardrail-{view.symbol}-{uuid.uuid4().hex[:8]}",
+                proposal_id=f"{kind}-{view.symbol}-{uuid.uuid4().hex[:8]}",
                 symbol=view.symbol,
                 exchange="NSE",
                 action=PortfolioAction.CLOSE_POSITION,
@@ -285,32 +307,82 @@ class ShadowReviewWorkflow:
                 capital_allocation_inr=None,
                 quantity_shares=view.quantity,
                 confidence=1.0,
-                thesis=(
-                    f"Invalidation guardrail: {view.symbol} at {view.last_price:.2f} "
-                    f"reached the entry plan's invalidation level {view.invalidation_price:.2f}."
-                ),
-                evidence=[f"LTP {view.last_price:.2f} <= invalidation {view.invalidation_price:.2f}"],
+                thesis=reason,
+                evidence=[f"LTP {price:.2f}"],
                 conditions_that_change_thesis=[],
             )
             try:
                 request = self.execution.prepare(
-                    f"guardrail-{uuid.uuid4().hex[:12]}",
-                    snapshot_id,
-                    proposal,
-                    view.last_price,
+                    f"{kind}-{uuid.uuid4().hex[:12]}", snapshot_id, proposal, price
                 )
                 await self.execution.submit(request)
             except Exception as exc:  # noqa: BLE001 - one stuck exit must not stop reviews
-                logger.warning("invalidation guardrail failed for %s: %s", view.symbol, exc)
+                logger.warning("%s exit failed for %s: %s", kind, view.symbol, exc)
                 continue
             self._emit(
                 "PAPER",
-                "guardrail_close",
-                f"INVALIDATION {view.symbol} {view.quantity} @ {view.last_price:.2f} "
-                f"(invalidation {view.invalidation_price:.2f}, paper)",
+                f"{kind}_close",
+                f"{kind.upper().replace('_', ' ')} {view.symbol} {view.quantity} @ {price:.2f}"
+                f" ({reason})",
                 symbol=view.symbol,
             )
             self.safety.record_submission()
+
+    def _exit_decision(
+        self, view: OpenPositionBrief, price: Decimal, atr_value: Decimal | None
+    ) -> tuple[str, str] | None:
+        """Return ``(kind, reason)`` when a deterministic rule says close."""
+        if (
+            view.invalidation_price is not None
+            and price <= view.invalidation_price
+        ):
+            return (
+                "invalidation",
+                f"Invalidation guardrail: {view.symbol} at {price:.2f} reached the entry "
+                f"plan's invalidation level {view.invalidation_price:.2f}.",
+            )
+
+        entry = view.average_entry_price
+        key = view.symbol.upper()
+        peak = max(self._peaks.get(key, entry), price)
+        self._peaks[key] = peak
+
+        trail_multiple = self.risk_rules.trail_atr_multiple
+        give_back = self.risk_rules.trail_give_back_fraction
+        if peak > entry and price > entry:
+            # Prefer a volatility-scaled trail when a real ATR exists; FYERS only
+            # publishes the day's OHLC, so fall back to capping how much of the
+            # peak gain may be surrendered. Never place the trail below entry:
+            # the trail's job is locking profit, not realising losses.
+            if atr_value is not None and atr_value > 0 and trail_multiple > 0:
+                trail_level = peak - atr_value * trail_multiple
+            elif give_back > 0:
+                trail_level = peak - (peak - entry) * give_back
+            else:
+                trail_level = None
+            if trail_level is not None and trail_level > entry and price <= trail_level:
+                return (
+                    "trail",
+                    f"Trailing stop: {view.symbol} at {price:.2f} gave back to "
+                    f"{trail_level:.2f} from its peak {peak:.2f} "
+                    f"(entry {entry:.2f}); locking the remaining gain.",
+                )
+
+        time_stop = self.risk_rules.time_stop_minutes
+        if (
+            time_stop > 0
+            and view.held_minutes is not None
+            and view.held_minutes >= time_stop
+            and view.unrealized_pct is not None
+            and Decimal("0") < view.unrealized_pct < self.risk_rules.time_stop_min_gain_pct
+        ):
+            return (
+                "time_stop",
+                f"Time stop: {view.symbol} held {view.held_minutes}m with only "
+                f"{view.unrealized_pct:.2f}% gain; freeing the slot instead of "
+                f"waiting on a stalled thesis.",
+            )
+        return None
 
     async def run(
         self,
@@ -327,10 +399,19 @@ class ShadowReviewWorkflow:
         before = await self.broker.get_account()
         views = await self._position_views(before, prices)
         position_brief = render_open_position_brief(views)
-        # Invalidation guardrail: the AI's own thesis-break level is enforced
-        # deterministically before any AI judgment, so a failed AI review can
-        # never strand a broken trade. Exits only; entries are the Jev gate's job.
-        await self._enforce_invalidations(views, state.snapshot_id)
+        atr_by_symbol = {
+            state.instrument.symbol.upper(): value
+            for state in board_states
+            if (value := atr(state.recent_1m_candles)) is not None
+        }
+        # Deterministic protective exits run before any AI judgment, so a failed
+        # or indecisive review can never strand a broken trade or give back a
+        # winner. Entries are the Jev and plan gates' job.
+        await self._enforce_exits(views, state.snapshot_id, atr_by_symbol)
+        open_symbols = {position.symbol.upper() for position in before.positions}
+        self._peaks = {
+            symbol: peak for symbol, peak in self._peaks.items() if symbol in open_symbols
+        }
         context_hash = hashlib.sha256(
             (
                 state.model_dump_json()
@@ -545,25 +626,66 @@ class ShadowReviewWorkflow:
                 self._emit("AI", "ai_hold", "AI chose to hold or stay in cash")
             await self.journal.save(record)
             return record
-        edge_reason = self._entry_edge_reason(executable[0], exec_state.last_price)
-        if edge_reason is not None:
-            # Deterministic last line before the order is built: a target that
-            # cannot pay for its own two fills is refused regardless of how
-            # confident the model or the critic is.
-            self._emit("SAFETY", "safety_result", f"DENY: {edge_reason}")
-            record = record.model_copy(
-                update={
-                    "status": DecisionStatus.DENIED_BY_SAFETY,
-                    "failure_reason": edge_reason,
-                    "safety_allowed": False,
-                    "safety_reason": edge_reason,
-                }
+        exec_proposal = executable[0]
+        if exec_proposal.action in ENTRY_ACTIONS:
+            plan_reason = self._entry_plan_reason(exec_proposal, exec_state.last_price)
+            if plan_reason is not None:
+                self._emit("SAFETY", "safety_result", f"DENY: {plan_reason}")
+                record = record.model_copy(
+                    update={
+                        "status": DecisionStatus.DENIED_BY_SAFETY,
+                        "failure_reason": plan_reason,
+                        "safety_allowed": False,
+                        "safety_reason": plan_reason,
+                    }
+                )
+                await self.journal.save(record)
+                return record
+            exec_proposal, sizing = self._size_for_risk(
+                exec_proposal, exec_state.last_price, before, views
             )
-            await self.journal.save(record)
-            return record
+            if sizing is not None and sizing.quantity <= 0:
+                reason = (
+                    f"risk sizing: even one share puts {sizing.risk_per_share:.2f} INR at "
+                    f"risk, above the {sizing.risk_budget:.2f} INR per-trade budget"
+                )
+                self._emit("SAFETY", "safety_result", f"DENY: {reason}")
+                record = record.model_copy(
+                    update={
+                        "status": DecisionStatus.DENIED_BY_SAFETY,
+                        "failure_reason": reason,
+                        "safety_allowed": False,
+                        "safety_reason": reason,
+                    }
+                )
+                await self.journal.save(record)
+                return record
+            if sizing is not None and sizing.capped:
+                self._emit(
+                    "SAFETY",
+                    "risk_sizing",
+                    f"Resized {exec_proposal.symbol} to {sizing.quantity} shares so the "
+                    f"{sizing.risk_per_share:.2f} INR stop distance fits the "
+                    f"{sizing.risk_budget:.2f} INR risk budget",
+                    symbol=exec_proposal.symbol,
+                )
+        else:
+            floor_reason = self._exit_floor_reason(exec_proposal, exec_state.last_price, before)
+            if floor_reason is not None:
+                self._emit("SAFETY", "safety_result", f"DENY: {floor_reason}")
+                record = record.model_copy(
+                    update={
+                        "status": DecisionStatus.DENIED_BY_SAFETY,
+                        "failure_reason": floor_reason,
+                        "safety_allowed": False,
+                        "safety_reason": floor_reason,
+                    }
+                )
+                await self.journal.save(record)
+                return record
         try:
             request = self.execution.prepare(
-                decision_id, exec_state.snapshot_id, executable[0], exec_state.last_price
+                decision_id, exec_state.snapshot_id, exec_proposal, exec_state.last_price
             )
         except ExecutionAdjustmentRequired as exc:
             record = record.model_copy(
@@ -616,18 +738,17 @@ class ShadowReviewWorkflow:
         self._mark("paper_order", trigger_ids)
         return record
 
-    def _entry_edge_reason(self, proposal: TradeProposal, price: Decimal) -> str | None:
-        """Refuse an entry whose stated target cannot pay for its own round trip.
+    def _entry_plan_reason(self, proposal: TradeProposal, price: Decimal) -> str | None:
+        """Refuse an entry whose stated plan cannot pay for itself or is badly skewed.
 
-        Purely arithmetic over the charge schedule — no AI call, no judgement,
-        so it cannot be argued out of by a confident model. Applies only to
-        entries: exits must stay frictionless even when they realise a loss.
-        A proposal with no target (or no way to size it) is not refused here;
-        it is simply unverifiable and keeps the existing execution checks.
+        Purely arithmetic over the plan the model stated — no AI call, no
+        judgement, so it cannot be argued out of by a confident model. Applies
+        only to entries: exits must stay frictionless even at a loss. A plan
+        missing a target or invalidation is not checked here; presence is
+        enforced where fresh AI output is accepted, which keeps archived
+        decisions replayable.
         """
         if proposal.action not in ENTRY_ACTIONS:
-            return None
-        if self.charge_rates is None or self.min_edge_cost_multiple <= 0:
             return None
         entry_price = proposal.desired_entry_price or price
         quantity = proposal.quantity_shares
@@ -636,20 +757,96 @@ class ShadowReviewWorkflow:
             if allocation is None or entry_price <= 0:
                 return None
             quantity = int((allocation / entry_price).to_integral_value(rounding=ROUND_DOWN))
-        edge = evaluate_entry_edge(
+        check = evaluate_entry_plan(
             entry_price=entry_price,
             target_price=proposal.target_price,
+            invalidation_price=proposal.invalidation_price,
             quantity=quantity,
-            rates=self.charge_rates,
-            required_multiple=self.min_edge_cost_multiple,
+            rates=self.risk_rules.charge_rates,
+            min_cost_multiple=self.risk_rules.min_edge_cost_multiple,
+            min_reward_risk=self.risk_rules.min_reward_risk,
+            entry_side=proposal.side or OrderSide.BUY,
         )
-        if edge.multiple is None or edge.allowed:
+        return None if check.allowed else check.reason
+
+    def _size_for_risk(
+        self,
+        proposal: TradeProposal,
+        price: Decimal,
+        portfolio: PortfolioState,
+        views: list[OpenPositionBrief],
+    ) -> tuple[TradeProposal, RiskSizing | None]:
+        """Cap an entry so its stop distance can never exceed the risk budget.
+
+        Sizing is a risk function, not a judgement call: the model's stated
+        quantity is only ever reduced. Equity is marked from the same live
+        prices the review used, so the budget does not drift with stale books.
+        """
+        if proposal.action not in ENTRY_ACTIONS or self.risk_rules.risk_per_trade_pct <= 0:
+            return proposal, None
+        equity = portfolio.cash + sum(
+            (
+                (view.last_price or Decimal("0")) * view.quantity
+                for view in views
+                if view.last_price is not None
+            ),
+            Decimal("0"),
+        )
+        # Respect the allocation budget when the model stated no share count:
+        # derive it exactly as execution would, then cap that. Sizing may only
+        # reduce a position, never invent a larger one.
+        requested = proposal.quantity_shares
+        if requested is None:
+            allocation = proposal.capital_allocation_inr
+            if allocation is None or price <= 0:
+                return proposal, None
+            requested = int((allocation / price).to_integral_value(rounding=ROUND_DOWN))
+            if requested <= 0:
+                return proposal, None
+        sizing = size_entry_by_risk(
+            equity=equity,
+            risk_per_trade_pct=self.risk_rules.risk_per_trade_pct,
+            entry_price=price,
+            invalidation_price=proposal.invalidation_price,
+            requested_quantity=requested,
+        )
+        if sizing is None:
+            return proposal, None
+        if not sizing.capped:
+            return proposal, sizing
+        if sizing.quantity <= 0:
+            return proposal.model_copy(update={"quantity_shares": 0}), sizing
+        return proposal.model_copy(update={"quantity_shares": sizing.quantity}), sizing
+
+    def _exit_floor_reason(
+        self, proposal: TradeProposal, price: Decimal, portfolio: PortfolioState
+    ) -> str | None:
+        """Refuse to pay exit charges larger than the gain being banked.
+
+        Applies only to voluntary exits that are still profitable: a losing exit
+        and an invalidation are always allowed out, because holding a loser to
+        dodge a fee is how small losses become large ones.
+        """
+        multiple = self.risk_rules.exit_floor_cost_multiple
+        rates = self.risk_rules.charge_rates
+        if multiple <= 0 or rates is None or price <= 0:
+            return None
+        symbol = (proposal.symbol or "").upper()
+        position = next(
+            (item for item in portfolio.positions if item.symbol.upper() == symbol), None
+        )
+        if position is None or position.quantity <= 0:
+            return None
+        quantity = proposal.quantity_shares or position.quantity
+        gross = (price - position.average_entry_price) * quantity
+        if gross <= 0:
+            return None
+        cost = compute_charges(OrderSide.SELL, price * quantity, rates).total
+        if cost <= 0 or gross >= cost * multiple:
             return None
         return (
-            f"edge gate: target {proposal.target_price} earns "
-            f"{edge.expected_gross_inr:.2f} INR gross against "
-            f"{edge.round_trip_cost_inr:.2f} INR round-trip charges "
-            f"({edge.multiple:.2f}x, needs {edge.required_multiple}x)"
+            f"exit floor: banking {gross:.2f} INR gross would cost {cost:.2f} INR in "
+            f"exit charges ({gross / cost:.2f}x, needs {multiple}x); holding instead"
         )
 
     def _describe(self, decision: PortfolioDecision) -> str:

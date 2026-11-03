@@ -34,6 +34,7 @@ from ai_trader.domain.orders import OrderSide
 from ai_trader.domain.portfolio import Position
 from ai_trader.execution.service import ExecutionService
 from ai_trader.journal.service import InMemoryDecisionJournal
+from ai_trader.risk.entry_plan import RiskRules
 from ai_trader.safety.envelope import KillSwitch, SafetyEnvelope
 
 INFY_PRICE = Decimal("1500.25")
@@ -169,6 +170,12 @@ def _workflow(
     charges: bool = True,
     multiple: str = "2.5",
 ) -> ShadowReviewWorkflow:
+    rules = RiskRules(
+        charge_rates=ChargeRates() if charges else None,
+        min_edge_cost_multiple=Decimal(multiple),
+        min_reward_risk=Decimal("0"),
+        risk_per_trade_pct=Decimal("0"),
+    )
     return ShadowReviewWorkflow(
         PortfolioManagerAgent(ai, "v13"),
         AgreeingCritic(),
@@ -178,8 +185,7 @@ def _workflow(
         InMemoryDecisionJournal(),
         clock,
         jev_min_entry_score=0.65,
-        charge_rates=ChargeRates() if charges else None,
-        min_edge_cost_multiple=Decimal(multiple),
+        risk_rules=rules,
     )
 
 
@@ -280,10 +286,13 @@ def test_exits_are_never_gated_by_edge(clock: Any) -> None:
     broker.positions["LT"] = Position(
         symbol="LT", quantity=6, average_entry_price=Decimal("100")
     )
-    broker.set_price("LT", Decimal("100.01"))
+    # A real gain, large enough that banking it is worth the exit charge: the
+    # edge gate must never stop an exit, and the exit floor only applies to
+    # dust profits.
+    broker.set_price("LT", Decimal("105"))
     workflow = _workflow(clock, ScriptedAI([_close("LT", 6)]), broker)
 
-    record = asyncio.run(workflow.run(infy, board=[infy], prices={"LT": Decimal("100.01")}))
+    record = asyncio.run(workflow.run(infy, board=[infy], prices={"LT": Decimal("105")}))
 
     assert record.status.value == "EXECUTED"
     assert record.orders_generated[0].request.symbol == "LT"
