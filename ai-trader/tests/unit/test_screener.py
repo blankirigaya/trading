@@ -92,7 +92,9 @@ def test_empty_board_and_nonpositive_prices() -> None:
 
 
 def test_top_n_bounds_the_shortlist() -> None:
-    board = [_state(f"S{i}", str(100 + i), prev_close="100") for i in range(8)]
-    assert len(rank_candidates(board)) == 5
+    board = [_state(f"S{i}", str(100 + i), prev_close="100") for i in range(20)]
+    # The default shortlist is a hint list, not a universe cap: it covers 10
+    # of the shard's names while the prompt still lists every symbol.
+    assert len(rank_candidates(board)) == 10
     assert len(rank_candidates(board, top_n=3)) == 3
     assert rank_candidates(board, top_n=0) == []

@@ -562,7 +562,7 @@ class Container:
         return ShadowReviewWorkflow(
             PortfolioManagerAgent(
                 provider,
-                "v14",
+                "v15",
                 position_limits=position_limits_text(
                     self.settings,
                     capital_cap_disabled=self.capital_cap_disabled,

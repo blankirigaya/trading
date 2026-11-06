@@ -4,15 +4,18 @@ The screener never trades and never overrules the AI. Each review it scores
 every board symbol on gap, volume surge, close location, and range expansion,
 all normalized to 0..1 and combined with fixed weights. Missing inputs simply
 drop that component (weights renormalize), so thin-history symbols still rank.
-The top names are marked in the prompt board block; the AI focuses there but
-may overrule with written justification.
+The top names are marked in the prompt board block as a starting hint; the AI
+may act on any symbol on the board and must justify choosing outside the list.
 """
 
 from dataclasses import dataclass
 
 from ai_trader.domain.market import MarketState
 
-_SHORTLIST_SIZE = 5
+# Ten names per shard: enough to surface every plausible setup without turning
+# the shortlist into a universe cap. The AI still sees (and may trade) the whole
+# board; this only orders attention.
+_SHORTLIST_SIZE = 10
 
 _WEIGHT_GAP = 0.35
 _WEIGHT_VOLUME = 0.30

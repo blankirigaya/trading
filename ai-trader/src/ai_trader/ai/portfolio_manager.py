@@ -265,14 +265,15 @@ class PortfolioManagerAgent:
                 f"{volatility} as_of={state.timestamp.isoformat()}{star}"
             )
         lines.append(
-            "Survey the whole board and propose at most one position in the single"
-            " best symbol, or hold/stay in cash. State quantity_shares explicitly."
+            "Survey every symbol on the watchlist, not only the starred ones, and"
+            " propose at most one position in the single best symbol, or hold/stay in cash."
+            " State quantity_shares explicitly."
         )
         if shortlist:
             lines.append(
-                "Screener shortlist (starred: strongest intraday signals this review): "
+                "Screener hint (starred: strongest intraday signals this review, ten per board): "
                 + ", ".join(sorted(shortlist))
-                + ". Start here; overrule only with a written, number-backed reason."
+                + ". A hint only — any unstarred symbol is a valid pick if its setup is better."
             )
         return "\n".join(lines) + "\n"
 

@@ -128,7 +128,7 @@ async def test_entry_without_invalidation_is_rejected() -> None:
     wrapped = EntryPlanRequired(ScriptedProvider([_entry("1520", invalidation=None)]))
     with pytest.raises(SchemaValidationError) as raised:
         await wrapped.structured_completion(
-            "s", "u", PortfolioDecision, prompt_name="p", prompt_version="v14"
+            "s", "u", PortfolioDecision, prompt_name="p", prompt_version="v15"
         )
     assert "invalidation_price" in raised.value.detail
 

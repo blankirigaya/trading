@@ -47,7 +47,7 @@ NOW = datetime(2026, 11, 3, 5, 0, tzinfo=UTC)
 
 def _meta() -> ProviderMetadata:
     return ProviderMetadata(
-        provider="test", model="test", prompt_name="portfolio_manager", prompt_version="v14"
+        provider="test", model="test", prompt_name="portfolio_manager", prompt_version="v15"
     )
 
 
@@ -279,7 +279,7 @@ class AgreeingCritic(JevCritic):
 
 def _workflow(clock: Any, ai: ScriptedAI, broker: PaperBroker, **rules: Any) -> ShadowReviewWorkflow:
     return ShadowReviewWorkflow(
-        PortfolioManagerAgent(ai, "v14"),
+        PortfolioManagerAgent(ai, "v15"),
         AgreeingCritic(),
         broker,
         SafetyEnvelope(Settings(trading_enabled=True), KillSwitch(), clock),

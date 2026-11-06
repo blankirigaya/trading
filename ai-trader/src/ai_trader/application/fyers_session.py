@@ -870,7 +870,7 @@ def build_session(
         )
         manager = PortfolioManagerAgent(
             provider,
-            "v14",
+            "v15",
             position_limits=position_limits_text(
                 settings,
                 capital_cap_disabled=capital_cap_disabled,
@@ -909,7 +909,7 @@ def build_session(
                 RetryingAIProvider(
                     EntryPlanRequired(sonnet_provider), settings.ai_schema_max_retries
                 ),
-                "v14",
+                "v15",
                 position_limits=position_limits_text(
                     settings,
                     capital_cap_disabled=capital_cap_disabled,
