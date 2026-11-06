@@ -45,15 +45,29 @@ class ExecutionService:
             # Exits free capital instead of requiring it: a CLOSE/REDUCE names
             # shares, not a budget. Derive the notional from live price so the
             # request stays exact; never invent an allocation cap for an exit.
-            if (
-                proposal.action
-                not in (PortfolioAction.CLOSE_POSITION, PortfolioAction.REDUCE_POSITION)
-                or proposal.quantity_shares is None
+            if proposal.action not in (
+                PortfolioAction.CLOSE_POSITION,
+                PortfolioAction.REDUCE_POSITION,
             ):
                 raise ExecutionAdjustmentRequired(
                     "proposal does not describe an executable order"
                 )
-            allocation = price * proposal.quantity_shares
+            quantity = proposal.quantity_shares
+            if quantity is None:
+                # A full close without a share count means "close the position".
+                # Defaulting to the held quantity keeps a requested exit
+                # executable instead of silently dropping it.
+                if proposal.action is not PortfolioAction.CLOSE_POSITION:
+                    raise ExecutionAdjustmentRequired(
+                        "proposal does not describe an executable order"
+                    )
+                position = getattr(self.broker, "positions", {}).get(proposal.symbol)
+                if position is None or position.quantity <= 0:
+                    raise ExecutionAdjustmentRequired(
+                        "proposal does not describe an executable order"
+                    )
+                quantity = position.quantity
+            allocation = price * quantity
         if proposal.quantity_shares is not None:
             # Stated shares are binding: the model names the exact share count
             # and the allocation acts as the budget cap.

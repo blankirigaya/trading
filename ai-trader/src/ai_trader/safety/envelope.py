@@ -63,6 +63,20 @@ class SafetyEnvelope:
                 return SafetyResult(False, "Order would exceed MAX_AI_CAPITAL_INR")
             if order.actual_order_value > self.settings.max_single_position_inr:
                 return SafetyResult(False, "Order would exceed MAX_SINGLE_POSITION_INR")
+            # Affordability is judged against the cash actually available, not
+            # against gross notional: with intraday margin only value/multiple
+            # of cash is blocked, so a book can carry large notional on modest
+            # cash. A zero gross cap disables the static bound entirely.
+            margin_multiple = self.settings.paper_margin_multiple
+            if margin_multiple <= 0:
+                margin_multiple = Decimal("1")
+            required_cash = order.actual_order_value / margin_multiple
+            if required_cash > portfolio.cash:
+                return SafetyResult(
+                    False,
+                    f"Insufficient available cash: order blocks {required_cash:.2f} INR "
+                    f"but only {portfolio.cash:.2f} INR is free",
+                )
             gross = sum(
                 (
                     position.average_entry_price * position.quantity
@@ -70,7 +84,10 @@ class SafetyEnvelope:
                 ),
                 Decimal("0"),
             )
-            if gross + order.actual_order_value > self.settings.max_gross_exposure_inr:
+            if (
+                self.settings.max_gross_exposure_inr > 0
+                and gross + order.actual_order_value > self.settings.max_gross_exposure_inr
+            ):
                 return SafetyResult(False, "Order would exceed MAX_GROSS_EXPOSURE_INR")
 
         if -portfolio.realized_pnl >= self.settings.max_daily_loss_inr:

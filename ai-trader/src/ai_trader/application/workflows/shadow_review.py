@@ -165,10 +165,13 @@ class ShadowReviewWorkflow:
             reasons.append("no side")
         if proposal.action not in TRADE_ACTIONS:
             reasons.append(f"{proposal.action.value} is not a trade action")
-        if proposal.capital_allocation_inr is None and not (
-            proposal.action in EXIT_ACTIONS and proposal.quantity_shares is not None
+        if proposal.capital_allocation_inr is None and proposal.action not in EXIT_ACTIONS:
+            reasons.append("no allocation for an entry")
+        if (
+            proposal.action is PortfolioAction.REDUCE_POSITION
+            and proposal.quantity_shares is None
         ):
-            reasons.append("no allocation and no exit share count")
+            reasons.append("reduce needs an explicit share count")
         if proposal.symbol is not None:
             if proposal.action in EXIT_ACTIONS and symbol not in held_symbols:
                 reasons.append("exit for a symbol that is not held")
@@ -540,9 +543,9 @@ class ShadowReviewWorkflow:
             and proposal.side is not None
             and (
                 proposal.capital_allocation_inr is not None
+                or proposal.action is PortfolioAction.CLOSE_POSITION
                 or (
-                    proposal.action
-                    in (PortfolioAction.CLOSE_POSITION, PortfolioAction.REDUCE_POSITION)
+                    proposal.action is PortfolioAction.REDUCE_POSITION
                     and proposal.quantity_shares is not None
                 )
             )
