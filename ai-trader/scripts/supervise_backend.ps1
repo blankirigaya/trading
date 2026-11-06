@@ -47,21 +47,14 @@ function Write-Heartbeat {
     Set-Content -Path $LockFile -Value $PID -NoNewline -ErrorAction SilentlyContinue
 }
 
-function Test-Port {
-    # TCP connect probe with a hard timeout: tests whether the backend truly
-    # accepts connections (better signal than LISTEN state) and can never
-    # hang the watchdog the way WMI/NetTCPConnection calls do on this machine.
-    $client = New-Object System.Net.Sockets.TcpClient
-    try {
-        $async = $client.BeginConnect("127.0.0.1", 8000, $null, $null)
-        if (-not $async.AsyncWaitHandle.WaitOne(3000)) { return $false }
-        $client.EndConnect($async)
-        return $true
-    } catch {
-        return $false
-    } finally {
-        $client.Close()
-    }
+function Test-Health {
+    # HTTP probe, not a bare TCP connect: a wedged uvicorn keeps the listening
+    # socket open (the kernel accepts into the backlog) while never answering a
+    # request. TCP-connect probes treat that as healthy, so the watchdog sat
+    # idle for minutes while the UI showed a dead backend. Only a real /health
+    # response counts as alive.
+    $out = & curl.exe -s --max-time 4 http://127.0.0.1:8000/health 2>$null
+    return ($out -match '"status"\s*:\s*"ok"')
 }
 
 function Get-ListenerPid {
@@ -74,6 +67,13 @@ function Get-ListenerPid {
             return [int]$Matches[1]
         }
     }
+    # This machine sometimes reports the listener as PID 0 (unattributable).
+    # Fall back to locating the server process directly so restarts can target
+    # the tree that is actually holding the port.
+    $python = Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
+        Where-Object { $_.CommandLine -like '*ai_trader.serve*' } |
+        Select-Object -First 1
+    if ($python) { return [int]$python.ProcessId }
     return $null
 }
 
@@ -81,7 +81,7 @@ function Test-ListenerGone {
     # One failed probe must never murder a healthy backend: only report the
     # listener gone after three consecutive misses a few seconds apart.
     for ($i = 0; $i -lt 3; $i++) {
-        if (Test-Port) { return $false }
+        if (Test-Health) { return $false }
         if ($i -lt 2) { Start-Sleep -Seconds 5 }
     }
     return $true
@@ -89,7 +89,7 @@ function Test-ListenerGone {
 
 function Wait-ForPort([int]$timeoutSec) {
     for ($i = 0; $i -lt $timeoutSec; $i += 2) {
-        if (Get-ListenerPid) { return $true }
+        if (Test-Health) { return $true }
         Start-Sleep -Seconds 2
     }
     return $false
@@ -117,7 +117,7 @@ if (Test-OtherSupervisor) {
 Write-Heartbeat
 
 while ($true) {
-    if (-not (Test-Port)) {
+    if (-not (Test-Health)) {
         Stop-Backend
         # Preserve the dead backend's log before the fresh one overwrites it.
         Copy-Item $BackendLog "$BackendLog.prev" -Force -ErrorAction SilentlyContinue
@@ -162,7 +162,7 @@ while ($true) {
     # is deliberately not a signal.)
     $watchStart = Get-Date
     # Watch the port; restart when the backend stops accepting connections.
-    # Test-Port needs ~10s of misses before it reports gone.
+    # Test-Health needs ~10s of misses before it reports gone.
     while (-not (Test-ListenerGone)) { Start-Sleep -Seconds 15; Write-Heartbeat }
     $servedFor = ((Get-Date) - $watchStart).TotalSeconds
     if ($servedFor -lt 120) {
