@@ -98,7 +98,10 @@ export const api = {
   newsLatency: (limit = 25) => request<NewsLatencyResponse>(`/news/latency?limit=${limit}`),
 
   // Safe controls only. There is deliberately no buy/sell/order endpoint.
-  requestReview: () => post<{ requested: boolean; decision_id: string | null }>('/control/review'),
+  requestReview: (scope: 'full' | 'entries' = 'full') =>
+    post<{ requested: boolean; decision_id: string | null }>(
+      `/control/review?scope=${scope}`,
+    ),
   startSession: () => post<{ running: boolean }>('/control/start'),
   stopSession: () => post<{ running: boolean }>('/control/stop'),
   setKillSwitch: (enabled: boolean) =>

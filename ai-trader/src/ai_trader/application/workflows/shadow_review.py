@@ -395,6 +395,7 @@ class ShadowReviewWorkflow:
         board: list[MarketState] | None = None,
         prices: Mapping[str, Decimal] | None = None,
         bars: Mapping[str, tuple[Candle, ...]] | None = None,
+        entry_only: bool = False,
     ) -> DecisionRecord:
         board_states = list(board) if board else [state]
         event_id = state.snapshot_id
@@ -444,7 +445,7 @@ class ShadowReviewWorkflow:
         try:
             initial, metadata = await self.manager.review(
                 state.recent_ticks[-1], before, news, board=board_states,
-                position_brief=position_brief, bars=bars,
+                position_brief=position_brief, bars=bars, entry_only=entry_only,
             )
         except (RemoteAIUnavailable, StructuredCompletionFailed) as exc:
             self._emit("ERROR", "provider_error", f"Remote AI unavailable: {exc}")
@@ -526,6 +527,19 @@ class ShadowReviewWorkflow:
             decision_summary=final_proposal.decision_summary,
             proposals=final_proposal.proposals,
         )
+        if entry_only:
+            # Entries-only review: the model was asked not to manage exits, and
+            # any exit it emits anyway is ignored. Deterministic exits already
+            # ran above, so nothing is stranded.
+            final = final.model_copy(
+                update={
+                    "proposals": [
+                        proposal
+                        for proposal in final.proposals
+                        if proposal.action in ENTRY_ACTIONS
+                    ]
+                }
+            )
         board_symbols = {s.instrument.symbol.upper() for s in board_states}
         # Live mark per symbol from the session's last feed snapshot, including
         # symbols whose state is too stale to review.
@@ -558,6 +572,10 @@ class ShadowReviewWorkflow:
                 )
             )
         ]
+        # When a decision both exits and enters, the exit takes the single order
+        # slot: freeing capital and banking a decision must never lose to a new
+        # entry in the same cycle.
+        executable.sort(key=lambda proposal: 0 if proposal.action in EXIT_ACTIONS else 1)
         exec_state = self._state_for_symbol(executable[:1] or final.proposals, state, board_states)
         if executable and executable[0].symbol is not None:
             symbol = executable[0].symbol.upper()

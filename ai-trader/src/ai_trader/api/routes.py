@@ -617,13 +617,21 @@ def _mean(values: list[int]) -> int | None:
 
 
 @router.post("/control/review")
-async def control_review(request: Request) -> dict[str, object]:
+async def control_review(request: Request, scope: str = "full") -> dict[str, object]:
+    """Run a review now.
+
+    ``scope=full`` (default) reviews exits and entries. ``scope=entries`` only
+    scans for new positions: deterministic exits still run, but the model is
+    told not to manage exits and any exit proposal is ignored.
+    """
+    if scope not in ("full", "entries"):
+        raise HTTPException(status_code=422, detail="scope must be 'full' or 'entries'")
     app = container(request)
     if app.runtime is None:
         raise HTTPException(
             status_code=409, detail="shadow runtime is not running; start the session first"
         )
-    result = await app.runtime.review_once()
+    result = await app.runtime.review_once(entry_only=scope == "entries")
     app.event_hub.publish(
         new_event("SYSTEM", "review_requested", "Manual AI review requested from UI")
     )

@@ -448,8 +448,12 @@ class ShadowSession:
             boards.append(board)
         return boards
 
-    async def review_once(self) -> SessionResult | None:
-        """Run one review on every shard concurrently; return the first completed."""
+    async def review_once(self, *, entry_only: bool = False) -> SessionResult | None:
+        """Run one review on every shard concurrently; return the first completed.
+
+        ``entry_only`` scans for new positions without asking the model to
+        manage exits; the deterministic exit engine still runs first.
+        """
         try:
             await self._refresh_universe()
         except Exception:
@@ -460,7 +464,7 @@ class ShadowSession:
             return None
         results = await self._gather_reviews(
             [
-                self._review_shard(shard, board, trigger="CADENCE")
+                self._review_shard(shard, board, trigger="CADENCE", entry_only=entry_only)
                 for shard, board in zip(self.shards, boards, strict=True)
                 if board
             ],
@@ -603,6 +607,7 @@ class ShadowSession:
         *,
         trigger: str = "CADENCE",
         use_sonnet: bool = False,
+        entry_only: bool = False,
     ) -> SessionResult | None:
         """Run one shard's review. Shards never share a broker, so they never block each other.
 
@@ -629,6 +634,7 @@ class ShadowSession:
                 board=board,
                 prices=prices,
                 bars=await self._bars_for(board, self._history_focus(shard, board)),
+                entry_only=entry_only,
             )
             shard.reviews += 1
             self.reviews += 1
@@ -907,7 +913,9 @@ def build_session(
         )
         manager = PortfolioManagerAgent(
             provider,
-            "v19",
+            "v21",
+            max_position_inr=None if capital_cap_disabled else settings.max_single_position_inr,
+            risk_per_trade_pct=settings.risk_per_trade_pct,
             position_limits=position_limits_text(
                 settings,
                 capital_cap_disabled=capital_cap_disabled,
@@ -946,7 +954,11 @@ def build_session(
                 RetryingAIProvider(
                     EntryPlanRequired(sonnet_provider), settings.ai_schema_max_retries
                 ),
-                "v19",
+                "v21",
+                max_position_inr=None
+                if capital_cap_disabled
+                else settings.max_single_position_inr,
+                risk_per_trade_pct=settings.risk_per_trade_pct,
                 position_limits=position_limits_text(
                     settings,
                     capital_cap_disabled=capital_cap_disabled,

@@ -409,6 +409,21 @@ describe('App shell', () => {
     await waitFor(() => expect(screen.getByTestId('review-requested')).toBeInTheDocument())
   })
 
+  it('scans for entries only without touching exits', async () => {
+    const { fetchMock } = stubBackend()
+    renderApp('/')
+    await userEvent.click(await screen.findByTestId('scan-entries'))
+    expect(screen.getByTestId('confirm-review')).toBeInTheDocument()
+    await userEvent.click(screen.getByTestId('confirm-button'))
+
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some((call) => String(call[0]).includes('scope=entries')),
+      ).toBe(true),
+    )
+    await waitFor(() => expect(screen.getByTestId('review-requested')).toBeInTheDocument())
+  })
+
   it('shows BACKEND OFFLINE without crashing when the API is unreachable', async () => {
     vi.stubGlobal(
       'fetch',

@@ -25,7 +25,7 @@ class ShadowRuntime(Protocol):
 
     async def stop(self) -> None: ...
 
-    async def review_once(self) -> ReviewResult | None: ...
+    async def review_once(self, *, entry_only: bool = False) -> ReviewResult | None: ...
 
 
 class NullShadowRuntime:
@@ -67,7 +67,7 @@ class ManagedShadowRuntime:
                 await self._task
             self._task = None
 
-    async def review_once(self) -> Any:
+    async def review_once(self, *, entry_only: bool = False) -> Any:
         if not self.session.socket_task:
             await self.session.start_ingestion()
-        return await self.session.review_once()
+        return await self.session.review_once(entry_only=entry_only)

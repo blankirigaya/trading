@@ -448,3 +448,34 @@ def test_negative_risk_settings_are_rejected(field: str) -> None:
 
     with pytest.raises(ValidationError):
         Settings(**{field: "-1"})  # type: ignore[arg-type]
+
+
+def test_entry_only_review_does_not_execute_exits(clock: Any) -> None:
+    """An entries-only scan must leave exits to the automatic rules."""
+    state = _state("INFY", "100")
+    broker = _held_broker(clock, "LT", "120")
+    decision = PortfolioDecision(
+        cash_percent=100,
+        allocations=[],
+        proposals=[
+            TradeProposal(
+                proposal_id="x",
+                symbol="LT",
+                action=PortfolioAction.CLOSE_POSITION,
+                side=OrderSide.SELL,
+                quantity_shares=10,
+                confidence=0.9,
+                thesis="bank it",
+            )
+        ],
+        market_summary="m",
+        decision_summary="d",
+    )
+    workflow = _workflow(clock, ScriptedAI([decision]), broker)
+
+    record = asyncio.run(
+        workflow.run(state, board=[state], prices={"LT": Decimal("120")}, entry_only=True)
+    )
+
+    assert record.orders_generated == []
+    assert broker.positions["LT"].quantity == 10

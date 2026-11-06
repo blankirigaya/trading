@@ -22,7 +22,7 @@ def market_clock(now: datetime) -> str:
 
     Payload timestamps are UTC ISO strings. A model left to interpret them
     itself reads "06:07Z" as 06:07 local and concludes the market just opened,
-    even at 11:37 IST — which changes what it thinks it is looking at. This
+    even at 11:37 IST â€” which changes what it thinks it is looking at. This
     states the IST wall clock and how far through the session we actually are,
     so "early session" conclusions are grounded in fact.
     """
@@ -144,7 +144,7 @@ def render_open_position_brief(positions: list[OpenPositionBrief]) -> str:
     """Prompt block listing live positions for the exit-first review."""
     if not positions:
         return ""
-    lines = ["Open positions (yours — review each for exit BEFORE hunting new entries):"]
+    lines = ["Open positions (yours â€” review each for exit BEFORE hunting new entries):"]
     for position in positions:
         if position.last_price is None or position.unrealized_inr is None:
             mark = "no live mark; exit only on a fresh price, never blind"
@@ -187,9 +187,16 @@ class PortfolioManagerAgent:
         prompt_version: str = "v1",
         *,
         position_limits: str | None = None,
+        max_position_inr: Decimal | None = None,
+        risk_per_trade_pct: Decimal | None = None,
     ) -> None:
         self.provider = provider
         self.prompt_version = prompt_version
+        # Caps used to pre-compute the desk's own size for the shortlisted
+        # names. None disables the plan line (and, for max_position, means the
+        # money cap is switched off so available cash is the only bound).
+        self.max_position_inr = max_position_inr
+        self.risk_per_trade_pct = risk_per_trade_pct
         template = (
             Path(__file__).parent / "prompts" / f"portfolio_manager_{prompt_version}.txt"
         ).read_text()
@@ -216,6 +223,7 @@ class PortfolioManagerAgent:
         board: list[MarketState] | None = None,
         position_brief: str = "",
         bars: Mapping[str, tuple[Candle, ...]] | None = None,
+        entry_only: bool = False,
     ) -> tuple[PortfolioDecision, ProviderMetadata]:
         return await self._complete(
             self._context(
@@ -225,6 +233,7 @@ class PortfolioManagerAgent:
                 board=board,
                 position_brief=position_brief,
                 bars=bars,
+                entry_only=entry_only,
             ),
             prompt=self._select_prompt(news),
         )
@@ -267,11 +276,42 @@ class PortfolioManagerAgent:
         board: list[MarketState] | None = None,
         position_brief: str = "",
         bars: Mapping[str, tuple[Candle, ...]] | None = None,
+        entry_only: bool = False,
     ) -> str:
-        board_block = self._board_block(board, bars=bars)
+        prices = {
+            state.instrument.symbol.upper(): state.last_price for state in (board or [])
+        }
+        equity = portfolio.cash + sum(
+            (
+                position.quantity
+                * prices.get(position.symbol.upper(), position.average_entry_price)
+                for position in portfolio.positions
+            ),
+            Decimal("0"),
+        )
+        risk_budget = (
+            equity * self.risk_per_trade_pct / Decimal(100)
+            if self.risk_per_trade_pct is not None
+            else None
+        )
+        max_position = self.max_position_inr if self.max_position_inr is not None else portfolio.cash
+        board_block = self._board_block(
+            board,
+            bars=bars,
+            risk_budget=risk_budget,
+            max_position=max_position,
+        )
         brief_block = f"{position_brief}" if position_brief else ""
+        entry_only_block = (
+            "This is an entries-only review. Exits are handled automatically by the desk: "
+            "do not propose CLOSE or REDUCE, and judge only whether a new position is worth "
+            "opening right now.\n"
+            if entry_only
+            else ""
+        )
         return (
             f"{market_clock(tick.exchange_timestamp)}\n"
+            f"{entry_only_block}"
             f"Market tick (timestamps UTC): {tick.model_dump_json()}\n"
             f"Portfolio: {portfolio.model_dump_json()}\n"
             f"{brief_block}"
@@ -285,26 +325,34 @@ class PortfolioManagerAgent:
         board: list[MarketState] | None,
         *,
         bars: Mapping[str, tuple[Candle, ...]] | None = None,
+        risk_budget: Decimal | None = None,
+        max_position: Decimal | None = None,
     ) -> str:
         """Compact one-line-per-symbol board so the AI can pick its own symbol.
 
         Each line carries live price plus, when history is available, the last
-        few 5-minute bars as high/low/close and a real ATR. Without them the
-        model can only guess at levels and trends. A deterministic screener
-        ranks the board first; the top names carry a star and are repeated as a
-        shortlist hint.
+        few 5-minute bars as high/low/close, a real ATR, and â€” for shortlisted
+        names â€” the desk's own compliant plan: size, stop, target, gross rupee
+        gain, round-trip cost, and the edge multiple. The model has repeatedly
+        sized expensive names at one share and mis-compared per-share gains to
+        costs; the arithmetic is done here instead.
         """
         if not board:
             return ""
+        from ai_trader.brokers.charges import compute_charges
+        from ai_trader.domain.orders import OrderSide
         from ai_trader.screening.indicators import atr
         from ai_trader.screening.screener import rank_candidates
 
         series_by_symbol = bars or {}
-        shortlist = {candidate.symbol for candidate in rank_candidates(board)}
+        shortlist = {candidate.symbol.upper() for candidate in rank_candidates(board)}
         lines = [
             "Watchlist (live FYERS prices, one line per symbol). "
             "5m= the most recent 5-minute bars as H/L/C, oldest first; "
-            "ATR5= average true range of those bars in rupees."
+            "ATR5= average true range of those bars in rupees. "
+            "plan= the desk's own compliant entry for a starred name: qty shares, "
+            "stop and target at our ATR distances, gross rupee gain, round-trip cost "
+            "and the gross/cost multiple; âœ“ means the cost gate is already cleared."
         ]
         for state in board:
             candle = state.current_1m_candle
@@ -315,7 +363,8 @@ class PortfolioManagerAgent:
                 else ""
             )
             prev = f" prev_close={state.previous_close}" if state.previous_close is not None else ""
-            series = series_by_symbol.get(state.instrument.symbol.upper())
+            symbol = state.instrument.symbol.upper()
+            series = series_by_symbol.get(symbol)
             atr_value = atr(list(series), 14) if series else None
             if atr_value is not None:
                 volatility = f" ATR5={atr_value.quantize(Decimal('0.01'))}"
@@ -341,10 +390,41 @@ class PortfolioManagerAgent:
                         volatility = ""
                 else:
                     volatility = ""
-            star = " ★" if state.instrument.symbol in shortlist else ""
+            plan = ""
+            if (
+                symbol in shortlist
+                and atr_value is not None
+                and atr_value > 0
+                and risk_budget is not None
+                and max_position is not None
+                and state.last_price > 0
+            ):
+                entry = state.last_price
+                stop = entry - atr_value * Decimal("0.75")
+                target = entry + atr_value * Decimal("1.5")
+                if stop > 0:
+                    by_allocation = int(max_position / entry)
+                    by_risk = int(risk_budget / (entry - stop))
+                    quantity = max(0, min(by_allocation, by_risk))
+                    if quantity > 0:
+                        gross = (target - entry) * quantity
+                        cost = (
+                            compute_charges(OrderSide.BUY, entry * quantity).total
+                            + compute_charges(OrderSide.SELL, target * quantity).total
+                        )
+                        edge = gross / cost if cost > 0 else None
+                        ok = "OK" if edge is not None and gross >= cost * Decimal("1.5") else "NO"
+                        plan = (
+                            f" plan: qty={quantity} stop={stop.quantize(Decimal('0.01'))}"
+                            f" target={target.quantize(Decimal('0.01'))}"
+                            f" gross={gross.quantize(Decimal('0.01'))}"
+                            f" cost={cost.quantize(Decimal('0.01'))}"
+                            f" edge={edge.quantize(Decimal('0.1')) if edge is not None else 0}x {ok}"
+                        )
+            star = " ★" if state.instrument.symbol.upper() in shortlist else ""
             lines.append(
                 f"  {state.instrument.symbol}: LTP={state.last_price}{prev}{ohlc}"
-                f"{volatility}{history} as_of={state.timestamp.astimezone(IST):%H:%M:%S} IST{star}"
+                f"{volatility}{history}{plan} as_of={state.timestamp.astimezone(IST):%H:%M:%S} IST{star}"
             )
         lines.append(
             "Survey every symbol on the watchlist, not only the starred ones, and"
@@ -355,7 +435,7 @@ class PortfolioManagerAgent:
             lines.append(
                 "Screener hint (starred: strongest intraday signals this review, ten per board): "
                 + ", ".join(sorted(shortlist))
-                + ". A hint only — any unstarred symbol is a valid pick if its setup is better."
+                + ". A hint only â€” any unstarred symbol is a valid pick if its setup is better."
             )
         return "\n".join(lines) + "\n"
 

@@ -358,16 +358,18 @@ export function Dashboard() {
   const { data: decisions } = useDecisions()
   const latest = decisions?.[0]
   const queryClient = useQueryClient()
-  const [confirmingReview, setConfirmingReview] = useState(false)
+  const [confirmingReview, setConfirmingReview] = useState<'full' | 'entries' | null>(null)
   const [reviewState, setReviewState] = useState<'idle' | 'running' | 'done' | 'error'>('idle')
+  const [reviewScope, setReviewScope] = useState<'full' | 'entries'>('full')
   const [reviewError, setReviewError] = useState<string | null>(null)
 
-  const requestReview = async () => {
-    setConfirmingReview(false)
+  const requestReview = async (scope: 'full' | 'entries') => {
+    setConfirmingReview(null)
+    setReviewScope(scope)
     setReviewState('running')
     setReviewError(null)
     try {
-      const result = await api.requestReview()
+      const result = await api.requestReview(scope)
       await queryClient.invalidateQueries({ queryKey: ['decisions'] })
       setReviewState(result.requested ? 'done' : 'idle')
     } catch (err) {
@@ -401,10 +403,24 @@ export function Dashboard() {
                   className="btn"
                   data-testid="request-review"
                   disabled={reviewState === 'running'}
-                  onClick={() => setConfirmingReview(true)}
-                  title="Force a full AI review now across all shards with live market data"
+                  onClick={() => setConfirmingReview('full')}
+                  title="Force a full AI review now across all shards: exits and entries"
                 >
-                  {reviewState === 'running' ? 'Reviewing…' : 'Request review'}
+                  {reviewState === 'running' && reviewScope === 'full'
+                    ? 'Reviewing…'
+                    : 'Full review'}
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  data-testid="scan-entries"
+                  disabled={reviewState === 'running'}
+                  onClick={() => setConfirmingReview('entries')}
+                  title="Scan for new entries only; exits stay with the automatic rules"
+                >
+                  {reviewState === 'running' && reviewScope === 'entries'
+                    ? 'Scanning…'
+                    : 'Scan entries'}
                 </button>
                 {latest ? (
                   <Link to="/decisions" className="dim">
@@ -415,7 +431,9 @@ export function Dashboard() {
             </div>
             {reviewState === 'done' ? (
               <div className="faint" data-testid="review-requested">
-                Review requested — the latest decision below refreshes when it lands.
+                {reviewScope === 'entries'
+                  ? 'Entry scan requested — new positions, if any, appear below.'
+                  : 'Review requested — the latest decision below refreshes when it lands.'}
               </div>
             ) : null}
             {reviewState === 'error' ? (
@@ -425,11 +443,19 @@ export function Dashboard() {
             ) : null}
             {confirmingReview ? (
               <ConfirmDialog
-                title="Request an AI review now?"
-                body="Runs a full review immediately across all shards on live market data, outside the regular cadence. This spends one review cycle and can place paper orders."
-                confirmLabel="Run review"
-                onConfirm={() => void requestReview()}
-                onCancel={() => setConfirmingReview(false)}
+                title={
+                  confirmingReview === 'entries'
+                    ? 'Scan for new entries now?'
+                    : 'Request a full AI review now?'
+                }
+                body={
+                  confirmingReview === 'entries'
+                    ? 'Runs an entries-only review now across all shards. Automatic exits (invalidations, trailing and time stops) still run first, but the AI will not close or reduce a position. Spends one review cycle and may open a paper position.'
+                    : 'Runs a full review immediately across all shards on live market data, outside the regular cadence. This spends one review cycle and can place paper orders, including exits.'
+                }
+                confirmLabel={confirmingReview === 'entries' ? 'Scan entries' : 'Run review'}
+                onConfirm={() => void requestReview(confirmingReview)}
+                onCancel={() => setConfirmingReview(null)}
                 testId="confirm-review"
               />
             ) : null}
