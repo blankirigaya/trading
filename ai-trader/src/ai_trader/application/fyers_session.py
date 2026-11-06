@@ -566,12 +566,31 @@ class ShadowSession:
                 results.append(outcome)
         return results
 
-    async def _bars_for(self, board: list[MarketState]) -> dict[str, tuple[Candle, ...]]:
+    def _history_focus(self, shard: ReviewShard, board: list[MarketState]) -> set[str]:
+        """Symbols worth fetching bars for: the shortlist plus open positions.
+
+        Fyеrs rate-limits history per symbol, so board-wide fetches earn 429s.
+        Ten candidates and any held name is enough for the model to reason
+        about structure; everything else keeps the session-range fallback.
+        """
+        from ai_trader.screening.screener import rank_candidates
+
+        focus = {candidate.symbol.upper() for candidate in rank_candidates(board)}
+        focus |= {
+            position.symbol.upper()
+            for position in shard.broker.positions.values()
+            if position.quantity
+        }
+        return focus
+
+    async def _bars_for(
+        self, board: list[MarketState], focus: set[str] | None = None
+    ) -> dict[str, tuple[Candle, ...]]:
         """Recent 5-minute bars for the board, or {} when history is unavailable."""
         if self.history is None:
             return {}
         try:
-            return await self.history.for_board(board)
+            return await self.history.for_board(board, only=focus)
         except Exception:  # noqa: BLE001 - history must never fail a review
             logger.exception("market history unavailable; falling back to session range")
             return {}
@@ -609,7 +628,7 @@ class ShadowSession:
                 bundle,
                 board=board,
                 prices=prices,
-                bars=await self._bars_for(board),
+                bars=await self._bars_for(board, self._history_focus(shard, board)),
             )
             shard.reviews += 1
             self.reviews += 1
@@ -888,7 +907,7 @@ def build_session(
         )
         manager = PortfolioManagerAgent(
             provider,
-            "v17",
+            "v19",
             position_limits=position_limits_text(
                 settings,
                 capital_cap_disabled=capital_cap_disabled,
@@ -927,7 +946,7 @@ def build_session(
                 RetryingAIProvider(
                     EntryPlanRequired(sonnet_provider), settings.ai_schema_max_retries
                 ),
-                "v17",
+                "v19",
                 position_limits=position_limits_text(
                     settings,
                     capital_cap_disabled=capital_cap_disabled,

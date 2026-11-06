@@ -45,9 +45,10 @@ class MarketHistory:
         clock: Clock,
         *,
         bars: int = 30,
-        ttl_seconds: int = 600,
-        failure_ttl_seconds: int = 60,
-        max_concurrent: int = 4,
+        ttl_seconds: int = 900,
+        failure_ttl_seconds: int = 120,
+        max_concurrent: int = 1,
+        min_interval_seconds: float = 0.35,
         timeout_seconds: float = 12.0,
     ) -> None:
         self._fetch = fetch
@@ -56,6 +57,7 @@ class MarketHistory:
         self._ttl = max(1, ttl_seconds)
         self._failure_ttl = max(1, failure_ttl_seconds)
         self._max_concurrent = max(1, max_concurrent)
+        self._min_interval = max(0.0, min_interval_seconds)
         self._timeout = timeout_seconds
         self._cache: dict[str, _Entry] = {}
 
@@ -65,18 +67,26 @@ class MarketHistory:
         return age < ttl
 
     async def for_board(
-        self, states: list[MarketState]
+        self,
+        states: list[MarketState],
+        *,
+        only: set[str] | None = None,
     ) -> dict[str, tuple[Candle, ...]]:
         """Return cached bars for every board symbol that has them.
 
-        Refreshes stale or missing symbols concurrently. Unknown or failed
-        symbols are simply absent from the result.
+        ``only`` restricts *fetching* to a focus set (the screener shortlist and
+        held positions). FYERS rate-limits the history endpoint hard — a burst
+        of board-wide requests earns 429s and starves the app — so this is
+        deliberately narrow; already-cached symbols are always returned.
         """
+        fetchable = {symbol.upper() for symbol in only} if only is not None else None
         pending: dict[str, Instrument] = {}
         for state in states:
             symbol = state.instrument.symbol.upper()
             entry = self._cache.get(symbol)
             if entry is not None and self._fresh(entry):
+                continue
+            if fetchable is not None and symbol not in fetchable:
                 continue
             pending[symbol] = state.instrument
 
@@ -85,6 +95,10 @@ class MarketHistory:
 
             async def load(symbol: str, instrument: Instrument) -> None:
                 async with semaphore:
+                    # Serialised and spaced: FYERS rejects bursts of history
+                    # requests with 429, which previously took the listener down.
+                    if self._min_interval:
+                        await asyncio.sleep(self._min_interval)
                     try:
                         candles = await asyncio.wait_for(
                             self._fetch(instrument, rest_symbol(instrument)),
