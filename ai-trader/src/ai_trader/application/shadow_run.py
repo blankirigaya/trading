@@ -145,7 +145,7 @@ async def run_once_shadow(
     workflow = ShadowReviewWorkflow(
         PortfolioManagerAgent(
             provider,
-            "v15",
+            "v16",
             position_limits=position_limits_text(
                 settings,
                 capital_cap_disabled=capital_cap_disabled,

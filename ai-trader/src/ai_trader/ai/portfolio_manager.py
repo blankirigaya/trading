@@ -1,6 +1,8 @@
 from dataclasses import dataclass
+from datetime import UTC, datetime, time
 from decimal import Decimal
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from ai_trader.ai.base import AIProvider
 from ai_trader.config import Settings
@@ -8,6 +10,55 @@ from ai_trader.domain.decisions import PortfolioDecision, ProviderMetadata
 from ai_trader.domain.market import MarketState, MarketTick
 from ai_trader.domain.portfolio import PortfolioState
 from ai_trader.news.review_context import NewsReviewBundle
+
+IST = ZoneInfo("Asia/Kolkata")
+_MARKET_OPEN_IST = time(9, 15)
+_SQUARE_OFF_IST = time(15, 10)
+
+
+def market_clock(now: datetime) -> str:
+    """Describe the current time unambiguously, in IST, for the manager prompt.
+
+    Payload timestamps are UTC ISO strings. A model left to interpret them
+    itself reads "06:07Z" as 06:07 local and concludes the market just opened,
+    even at 11:37 IST — which changes what it thinks it is looking at. This
+    states the IST wall clock and how far through the session we actually are,
+    so "early session" conclusions are grounded in fact.
+    """
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+    local = now.astimezone(IST)
+    open_at = local.replace(
+        hour=_MARKET_OPEN_IST.hour,
+        minute=_MARKET_OPEN_IST.minute,
+        second=0,
+        microsecond=0,
+    )
+    flat_at = local.replace(
+        hour=_SQUARE_OFF_IST.hour,
+        minute=_SQUARE_OFF_IST.minute,
+        second=0,
+        microsecond=0,
+    )
+    clock = f"Current time: {local:%H:%M} IST, {local:%A %d %B %Y}."
+    minutes_since_open = int((local - open_at).total_seconds() // 60)
+    minutes_to_flat = int((flat_at - local).total_seconds() // 60)
+    if minutes_since_open < 0:
+        phase = f"The NSE cash session opens in {abs(minutes_since_open)} minutes (09:15 IST)."
+    elif minutes_to_flat <= 0:
+        phase = (
+            "The NSE cash session is at or past the 15:10 IST square-off; "
+            "no new entries are permitted."
+        )
+    else:
+        phase = (
+            f"The NSE cash session has been open for {minutes_since_open} minutes; "
+            f"new entries stop in {minutes_to_flat} minutes (15:10 IST square-off)."
+        )
+    return (
+        f"{clock} {phase} Treat the market as already in progress: do not assume "
+        "a fresh open. Timestamps in the payloads below are UTC, not IST."
+    )
 
 # Appended to the versioned prompt when news is present, so a change to how news is
 # presented is a new prompt version rather than a silent behaviour change.
@@ -210,7 +261,8 @@ class PortfolioManagerAgent:
         board_block = self._board_block(board)
         brief_block = f"{position_brief}" if position_brief else ""
         return (
-            f"Market tick: {tick.model_dump_json()}\n"
+            f"{market_clock(tick.exchange_timestamp)}\n"
+            f"Market tick (timestamps UTC): {tick.model_dump_json()}\n"
             f"Portfolio: {portfolio.model_dump_json()}\n"
             f"{brief_block}"
             f"{board_block}"
@@ -262,7 +314,7 @@ class PortfolioManagerAgent:
             star = " ★" if state.instrument.symbol in shortlist else ""
             lines.append(
                 f"  {state.instrument.symbol}: LTP={state.last_price}{prev}{ohlc}"
-                f"{volatility} as_of={state.timestamp.isoformat()}{star}"
+                f"{volatility} as_of={state.timestamp.astimezone(IST):%H:%M:%S} IST{star}"
             )
         lines.append(
             "Survey every symbol on the watchlist, not only the starred ones, and"
