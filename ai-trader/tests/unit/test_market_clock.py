@@ -56,7 +56,7 @@ class _CapturingAI:
 
 
 def test_context_puts_the_clock_before_the_payload() -> None:
-    manager = PortfolioManagerAgent(_CapturingAI(), "v16")  # type: ignore[arg-type]
+    manager = PortfolioManagerAgent(_CapturingAI(), "v17")  # type: ignore[arg-type]
     from decimal import Decimal
 
     from ai_trader.domain.market import MarketTick

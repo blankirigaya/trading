@@ -24,7 +24,7 @@ from ai_trader.domain.decisions import (
     ProviderMetadata,
     TradeProposal,
 )
-from ai_trader.domain.market import Instrument, MarketState
+from ai_trader.domain.market import Candle, Instrument, MarketState
 from ai_trader.domain.orders import Order, OrderRequest, OrderSide
 from ai_trader.domain.portfolio import PortfolioState
 from ai_trader.execution.service import ExecutionAdjustmentRequired, ExecutionService
@@ -391,6 +391,7 @@ class ShadowReviewWorkflow:
         *,
         board: list[MarketState] | None = None,
         prices: Mapping[str, Decimal] | None = None,
+        bars: Mapping[str, tuple[Candle, ...]] | None = None,
     ) -> DecisionRecord:
         board_states = list(board) if board else [state]
         event_id = state.snapshot_id
@@ -400,10 +401,17 @@ class ShadowReviewWorkflow:
         views = await self._position_views(before, prices)
         position_brief = render_open_position_brief(views)
         atr_by_symbol = {
-            state.instrument.symbol.upper(): value
-            for state in board_states
-            if (value := atr(state.recent_1m_candles)) is not None
+            symbol.upper(): value
+            for symbol, series in (bars or {}).items()
+            if (value := atr(list(series))) is not None
         }
+        for state in board_states:
+            symbol = state.instrument.symbol.upper()
+            if symbol in atr_by_symbol:
+                continue
+            value = atr(state.recent_1m_candles)
+            if value is not None:
+                atr_by_symbol[symbol] = value
         # Deterministic protective exits run before any AI judgment, so a failed
         # or indecisive review can never strand a broken trade or give back a
         # winner. Entries are the Jev and plan gates' job.
@@ -433,7 +441,7 @@ class ShadowReviewWorkflow:
         try:
             initial, metadata = await self.manager.review(
                 state.recent_ticks[-1], before, news, board=board_states,
-                position_brief=position_brief,
+                position_brief=position_brief, bars=bars,
             )
         except (RemoteAIUnavailable, StructuredCompletionFailed) as exc:
             self._emit("ERROR", "provider_error", f"Remote AI unavailable: {exc}")

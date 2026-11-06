@@ -24,6 +24,7 @@ from ai_trader.ai.portfolio_manager import PortfolioManagerAgent, position_limit
 from ai_trader.ai.providers import build_ai_provider
 from ai_trader.ai.remote_model import AIHealth
 from ai_trader.ai.retries import RetryingAIProvider
+from ai_trader.application.market_history import MarketHistory
 from ai_trader.application.universe import (
     CHEAP_MAX_PRICE_INR,
     DEFAULT_UNIVERSE_MODE,
@@ -38,7 +39,7 @@ from ai_trader.brokers.paper import PaperBroker
 from ai_trader.config import Settings
 from ai_trader.domain.common import Clock, SystemClock
 from ai_trader.domain.decisions import DecisionStatus, PortfolioAction, TradeProposal
-from ai_trader.domain.market import MarketState, stale_data_reason
+from ai_trader.domain.market import Candle, MarketState, stale_data_reason
 from ai_trader.domain.news import NewsAnalysis, NewsItem, NewsPortfolioReviewContext
 from ai_trader.domain.orders import Order, OrderSide
 from ai_trader.execution.service import ExecutionAdjustmentRequired, ExecutionService
@@ -193,6 +194,7 @@ class ShadowSession:
     event_sink: EmitFn | None = None
     news_analyses: Callable[[int], list[NewsAnalysis]] | None = None
     providers: tuple[AIProvider, ...] = ()
+    history: MarketHistory | None = None
     socket_task: asyncio.Task[None] | None = None
     review_task: asyncio.Task[None] | None = None
     reviews: int = 0
@@ -564,6 +566,16 @@ class ShadowSession:
                 results.append(outcome)
         return results
 
+    async def _bars_for(self, board: list[MarketState]) -> dict[str, tuple[Candle, ...]]:
+        """Recent 5-minute bars for the board, or {} when history is unavailable."""
+        if self.history is None:
+            return {}
+        try:
+            return await self.history.for_board(board)
+        except Exception:  # noqa: BLE001 - history must never fail a review
+            logger.exception("market history unavailable; falling back to session range")
+            return {}
+
     async def _review_shard(
         self,
         shard: ReviewShard,
@@ -592,7 +604,13 @@ class ShadowSession:
             if use_sonnet and shard.sonnet_workflow is not None and self._sonnet_escalation_ok():
                 workflow = shard.sonnet_workflow
                 self.sonnet_escalations_today += 1
-            record = await workflow.run(state, bundle, board=board, prices=prices)
+            record = await workflow.run(
+                state,
+                bundle,
+                board=board,
+                prices=prices,
+                bars=await self._bars_for(board),
+            )
             shard.reviews += 1
             self.reviews += 1
             if trigger == "NEWS":
@@ -870,7 +888,7 @@ def build_session(
         )
         manager = PortfolioManagerAgent(
             provider,
-            "v16",
+            "v17",
             position_limits=position_limits_text(
                 settings,
                 capital_cap_disabled=capital_cap_disabled,
@@ -909,7 +927,7 @@ def build_session(
                 RetryingAIProvider(
                     EntryPlanRequired(sonnet_provider), settings.ai_schema_max_retries
                 ),
-                "v16",
+                "v17",
                 position_limits=position_limits_text(
                     settings,
                     capital_cap_disabled=capital_cap_disabled,
@@ -973,6 +991,21 @@ def build_session(
             review_held_positions=settings.news_review_held_positions,
         )
 
+    # Historical bars are only available on a real FYERS feed; test doubles and
+    # other providers simply run without them and keep the range fallback.
+    history: MarketHistory | None = None
+    auth = getattr(getattr(feed, "socket", None), "auth", None)
+    if auth is not None:
+        from ai_trader.application.market_history import MarketHistory as _MarketHistory
+        from ai_trader.integrations.fyers.historical import fetch_ohlcv
+
+        history = _MarketHistory(
+            lambda instrument, symbol: fetch_ohlcv(
+                auth, symbol, instrument, resolution="5", days_back=1
+            ),
+            active_clock,
+        )
+
     session = ShadowSession(
         settings=settings,
         feed=feed,
@@ -986,6 +1019,7 @@ def build_session(
         market_sink=market_sink,
         event_sink=event_sink,
         providers=tuple(providers),
+        history=history,
         universe_master=tuple(universe_master if universe_master is not None else resolve_master(settings)),
         universe_mode=universe_mode or settings.universe_mode,
         universe_size=settings.universe_size,

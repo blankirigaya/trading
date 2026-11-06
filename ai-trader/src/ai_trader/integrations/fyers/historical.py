@@ -24,33 +24,55 @@ async def fetch_ohlcv(
     range_to: datetime | None = None,
     days_back: int = 1,
 ) -> list[Candle]:
-    """Fetch historical candles for one FYERS symbol, oldest first."""
+    """Fetch historical candles for one FYERS symbol, oldest first.
+
+    Uses the v3 ``GET /data/history`` endpoint. FYERS returns rows as
+    ``[epoch, open, high, low, close, volume]`` arrays, so they are adapted to
+    the dict shape ``normalize_ohlcv_rows`` expects.
+    """
     if resolution not in RESOLUTION_MINUTES:
         raise FyersHistoricalError(f"unsupported resolution: {resolution}")
     end = range_to or datetime.now(UTC)
     start = range_from or (end - timedelta(days=days_back))
-    payload = {
+    params = {
         "symbol": symbol,
         "resolution": resolution,
         "date_format": "1",
         "range_from": start.strftime("%Y-%m-%d"),
         "range_to": end.strftime("%Y-%m-%d"),
-        "cont_flag": "0",
+        "cont_flag": "1",
     }
     try:
         async with httpx.AsyncClient(timeout=20) as client:
-            response = await client.post(
-                f"{auth.api_base_url}/data/ohlcv",
+            response = await client.get(
+                f"{auth.api_base_url}/data/history",
                 headers={"Authorization": auth.authorization_header},
-                json=payload,
+                params=params,
             )
             response.raise_for_status()
         body = response.json()
     except httpx.HTTPError as exc:
-        raise FyersHistoricalError("FYERS OHLCV request failed") from exc
+        raise FyersHistoricalError("FYERS history request failed") from exc
+
+    if isinstance(body, dict) and body.get("s") not in (None, "ok"):
+        raise FyersHistoricalError(f"FYERS history rejected: {body.get('message')}")
 
     candles = body.get("candles") if isinstance(body, dict) else None
     if not isinstance(candles, list):
-        raise FyersHistoricalError("FYERS OHLCV response did not contain candles")
-    rows = [row for row in candles if isinstance(row, dict)]
+        raise FyersHistoricalError("FYERS history response did not contain candles")
+    rows: list[dict[str, object]] = []
+    for row in candles:
+        if isinstance(row, dict):
+            rows.append(row)
+        elif isinstance(row, list) and len(row) >= 5:
+            rows.append(
+                {
+                    "epoch": row[0],
+                    "open": row[1],
+                    "high": row[2],
+                    "low": row[3],
+                    "close": row[4],
+                    "volume": row[5] if len(row) > 5 else None,
+                }
+            )
     return normalize_ohlcv_rows(instrument, rows)

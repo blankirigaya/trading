@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, time
 from decimal import Decimal
@@ -7,7 +8,7 @@ from zoneinfo import ZoneInfo
 from ai_trader.ai.base import AIProvider
 from ai_trader.config import Settings
 from ai_trader.domain.decisions import PortfolioDecision, ProviderMetadata
-from ai_trader.domain.market import MarketState, MarketTick
+from ai_trader.domain.market import Candle, MarketState, MarketTick
 from ai_trader.domain.portfolio import PortfolioState
 from ai_trader.news.review_context import NewsReviewBundle
 
@@ -214,9 +215,17 @@ class PortfolioManagerAgent:
         *,
         board: list[MarketState] | None = None,
         position_brief: str = "",
+        bars: Mapping[str, tuple[Candle, ...]] | None = None,
     ) -> tuple[PortfolioDecision, ProviderMetadata]:
         return await self._complete(
-            self._context(tick, portfolio, news, board=board, position_brief=position_brief),
+            self._context(
+                tick,
+                portfolio,
+                news,
+                board=board,
+                position_brief=position_brief,
+                bars=bars,
+            ),
             prompt=self._select_prompt(news),
         )
 
@@ -257,8 +266,9 @@ class PortfolioManagerAgent:
         *,
         board: list[MarketState] | None = None,
         position_brief: str = "",
+        bars: Mapping[str, tuple[Candle, ...]] | None = None,
     ) -> str:
-        board_block = self._board_block(board)
+        board_block = self._board_block(board, bars=bars)
         brief_block = f"{position_brief}" if position_brief else ""
         return (
             f"{market_clock(tick.exchange_timestamp)}\n"
@@ -271,20 +281,31 @@ class PortfolioManagerAgent:
         )
 
     @staticmethod
-    def _board_block(board: list[MarketState] | None) -> str:
+    def _board_block(
+        board: list[MarketState] | None,
+        *,
+        bars: Mapping[str, tuple[Candle, ...]] | None = None,
+    ) -> str:
         """Compact one-line-per-symbol board so the AI can pick its own symbol.
 
-        A deterministic screener ranks the board first; the top names carry a
-        star and are repeated as a shortlist. The AI focuses there but may
-        overrule with written justification.
+        Each line carries live price plus, when history is available, the last
+        few 5-minute bars as high/low/close and a real ATR. Without them the
+        model can only guess at levels and trends. A deterministic screener
+        ranks the board first; the top names carry a star and are repeated as a
+        shortlist hint.
         """
         if not board:
             return ""
         from ai_trader.screening.indicators import atr
         from ai_trader.screening.screener import rank_candidates
 
+        series_by_symbol = bars or {}
         shortlist = {candidate.symbol for candidate in rank_candidates(board)}
-        lines = ["Watchlist (live FYERS prices, one line per symbol):"]
+        lines = [
+            "Watchlist (live FYERS prices, one line per symbol). "
+            "5m= the most recent 5-minute bars as H/L/C, oldest first; "
+            "ATR5= average true range of those bars in rupees."
+        ]
         for state in board:
             candle = state.current_1m_candle
             ohlc = (
@@ -294,27 +315,36 @@ class PortfolioManagerAgent:
                 else ""
             )
             prev = f" prev_close={state.previous_close}" if state.previous_close is not None else ""
-            atr_value = atr(state.recent_1m_candles or ([candle] if candle else []))
+            series = series_by_symbol.get(state.instrument.symbol.upper())
+            atr_value = atr(list(series), 14) if series else None
             if atr_value is not None:
-                volatility = f" ATR={atr_value.quantize(Decimal('0.01'))}"
-            elif candle is not None and state.previous_close:
-                # FYERS publishes only the day's OHLC, so normalise on the
-                # session range rather than inventing an ATR.
-                day_range = candle.high - candle.low
-                if day_range > 0:
-                    range_pct = day_range / state.previous_close * Decimal(100)
-                    volatility = (
-                        f" range={day_range.quantize(Decimal('0.01'))}"
-                        f" ({range_pct.quantize(Decimal('0.01'))}%)"
-                    )
+                volatility = f" ATR5={atr_value.quantize(Decimal('0.01'))}"
+                history = " 5m=" + ",".join(
+                    f"{c.high.quantize(Decimal('0.01'))}/"
+                    f"{c.low.quantize(Decimal('0.01'))}/"
+                    f"{c.close.quantize(Decimal('0.01'))}"
+                    for c in series
+                )
+            else:
+                history = ""
+                if candle is not None and state.previous_close:
+                    # No bar history: fall back to the session range and say so,
+                    # rather than presenting a range as if it were an ATR.
+                    day_range = candle.high - candle.low
+                    if day_range > 0:
+                        range_pct = day_range / state.previous_close * Decimal(100)
+                        volatility = (
+                            f" range={day_range.quantize(Decimal('0.01'))}"
+                            f" ({range_pct.quantize(Decimal('0.01'))}%)"
+                        )
+                    else:
+                        volatility = ""
                 else:
                     volatility = ""
-            else:
-                volatility = ""
             star = " ★" if state.instrument.symbol in shortlist else ""
             lines.append(
                 f"  {state.instrument.symbol}: LTP={state.last_price}{prev}{ohlc}"
-                f"{volatility} as_of={state.timestamp.astimezone(IST):%H:%M:%S} IST{star}"
+                f"{volatility}{history} as_of={state.timestamp.astimezone(IST):%H:%M:%S} IST{star}"
             )
         lines.append(
             "Survey every symbol on the watchlist, not only the starred ones, and"
