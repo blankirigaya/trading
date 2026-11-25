@@ -32,7 +32,7 @@ class RiskRules:
     min_edge_cost_multiple: Decimal = Decimal("2.5")
     min_reward_risk: Decimal = Decimal("2.0")
     risk_per_trade_pct: Decimal = Decimal("0.5")
-    trail_atr_multiple: Decimal = Decimal("0.5")
+    trail_atr_multiple: Decimal = Decimal("1.0")
     trail_give_back_fraction: Decimal = Decimal("0.5")
     time_stop_minutes: int = 90
     time_stop_min_gain_pct: Decimal = Decimal("0.25")

@@ -47,7 +47,7 @@ class Settings(BaseSettings):
     risk_per_trade_pct: Decimal = Decimal("0.5")
     # Protective exits (deterministic, evaluated every review):
     # trailing stop distance in ATRs behind the position's peak price...
-    trail_atr_multiple: Decimal = Decimal("0.5")
+    trail_atr_multiple: Decimal = Decimal("1.0")
     # ...and, when no ATR is available (FYERS publishes only the day's OHLC),
     # the fraction of the peak gain the trail is allowed to give back.
     trail_give_back_fraction: Decimal = Decimal("0.5")

@@ -400,8 +400,8 @@ class PortfolioManagerAgent:
                 and state.last_price > 0
             ):
                 entry = state.last_price
-                stop = entry - atr_value * Decimal("0.75")
-                target = entry + atr_value * Decimal("1.5")
+                stop = entry - atr_value * Decimal("1.5")
+                target = entry + atr_value * Decimal("3.0")
                 if stop > 0:
                     by_allocation = int(max_position / entry)
                     by_risk = int(risk_budget / (entry - stop))
