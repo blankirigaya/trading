@@ -384,8 +384,20 @@ def normalize_mode(mode: str) -> str:
 
 
 def resolve_master(settings: Settings) -> tuple[str, ...]:
-    """The configured master list, or the built-in liquid list when unset."""
-    return tuple(settings.universe_master) or MASTER_UNIVERSE
+    """The configured master list, or the built-in liquid list when unset.
+
+    Excluded symbols are dropped from either source, so a ban survives a
+    master-list change and needs no 300-symbol override to express.
+    """
+    master = tuple(settings.universe_master) or MASTER_UNIVERSE
+    excluded = {
+        symbol.strip().upper() for symbol in settings.universe_exclude if symbol.strip()
+    }
+    if not excluded:
+        return master
+    return tuple(
+        symbol for symbol in master if symbol.strip().upper() not in excluded
+    )
 
 
 def select_universe(

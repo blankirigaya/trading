@@ -115,6 +115,10 @@ class Settings(BaseSettings):
     # Broad candidate list the AI universe is selected from each cycle. Empty
     # uses the built-in liquid list (application.universe.MASTER_UNIVERSE).
     universe_master: tuple[str, ...] = ()
+    # Symbols the AI never reviews or trades, in FYERS wire format
+    # (e.g. "NSE:YATRA-EQ"). Empty means no exclusions. Applies on top of
+    # either master list, so banned names stay out across restarts.
+    universe_exclude: tuple[str, ...] = ()
     # cheap | mixed | expensive. The persisted control value wins over this
     # default once the operator switches it from the UI.
     universe_mode: str = "cheap"
@@ -350,7 +354,7 @@ class Settings(BaseSettings):
             raise ValueError("UNIVERSE_SIZE must be positive")
         return value
 
-    @field_validator("universe_master", mode="before")
+    @field_validator("universe_master", "universe_exclude", mode="before")
     @classmethod
     def _universe_master(cls, value: object) -> object:
         if value in (None, ""):
