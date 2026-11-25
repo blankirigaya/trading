@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 
 from ai_trader.ai.base import AIProvider
 from ai_trader.ai.entry_plan import EntryPlanRequired
-from ai_trader.ai.jev import build_critic
+from ai_trader.ai.jev import DisabledJevCritic, build_critic
 from ai_trader.ai.portfolio_manager import PortfolioManagerAgent, position_limits_text
 from ai_trader.ai.providers import build_ai_provider
 from ai_trader.ai.remote_model import AIHealth
@@ -218,6 +218,10 @@ class ShadowSession:
     tier1_news_enabled: bool = True
     news_analysis_enabled: bool = True
     sonnet_escalation_enabled: bool = True
+    # Operator kill switch for the Jev critic. When False, reviews run without
+    # any critique or reconsideration: the AI's proposal goes straight through
+    # (still gated by the plan, safety, and execution checks).
+    jev_enabled: bool = True
     # Sonnet NEWS reviews used today (IST date below); bounded by
     # ai_max_sonnet_escalations_per_day so a news storm cannot 100x spend.
     sonnet_escalations_today: int = 0
@@ -263,6 +267,21 @@ class ShadowSession:
     def set_sonnet_escalation_enabled(self, enabled: bool) -> None:
         """Apply the Sonnet-escalation kill switch without a restart."""
         self.sonnet_escalation_enabled = enabled
+
+    def set_jev_enabled(self, enabled: bool) -> None:
+        """Apply the Jev kill switch without a restart.
+
+        Swaps every shard workflow (cadence and Sonnet twin) between the live
+        critic and the disabled stand-in, which agrees with everything and is
+        journalled as SKIPPED. No critique call, no reconsideration, no entry
+        gate; the plan, safety, and execution checks still apply.
+        """
+        self.jev_enabled = enabled
+        critic = build_critic(self.settings) if enabled else DisabledJevCritic()
+        for shard in self.shards:
+            shard.workflow.critic = critic
+            if shard.sonnet_workflow is not None:
+                shard.sonnet_workflow.critic = critic
 
     def _sonnet_escalation_ok(self) -> bool:
         """Whether a NEWS review may run on Sonnet right now."""
@@ -861,6 +880,7 @@ def build_session(
     tier1_news_enabled: bool = True,
     news_analysis_enabled: bool = True,
     sonnet_escalation_enabled: bool = True,
+    jev_enabled: bool = True,
 ) -> ShadowSession:
     """Assemble a shadow session with sharded parallel reviewers.
 
@@ -883,7 +903,7 @@ def build_session(
     per_shard = total // len(groups)
     leftovers = total - per_shard * len(groups)
 
-    critic = build_critic(settings)
+    critic = DisabledJevCritic() if not jev_enabled else build_critic(settings)
     news_repository = NewsRepository(engine)
     ensure_journal_tables(engine)
     ensure_trade_tables(engine)
@@ -913,7 +933,7 @@ def build_session(
         )
         manager = PortfolioManagerAgent(
             provider,
-            "v21",
+            "v22",
             max_position_inr=None if capital_cap_disabled else settings.max_single_position_inr,
             risk_per_trade_pct=settings.risk_per_trade_pct,
             position_limits=position_limits_text(
@@ -954,7 +974,7 @@ def build_session(
                 RetryingAIProvider(
                     EntryPlanRequired(sonnet_provider), settings.ai_schema_max_retries
                 ),
-                "v21",
+                "v22",
                 max_position_inr=None
                 if capital_cap_disabled
                 else settings.max_single_position_inr,
@@ -1062,6 +1082,7 @@ def build_session(
         tier1_news_enabled=tier1_news_enabled,
         news_analysis_enabled=news_analysis_enabled,
         sonnet_escalation_enabled=sonnet_escalation_enabled,
+        jev_enabled=jev_enabled,
         news_analyses=(
             lambda limit: news_repository.recent_analyses(limit=limit)
             if settings.news_enabled
@@ -1139,6 +1160,7 @@ async def build_session_from_settings(
     sonnet_escalation_enabled = await control.get_sonnet_escalation_enabled(
         settings.sonnet_escalation_enabled
     )
+    jev_enabled = await control.get_jev_enabled(settings.jev_enabled)
     return build_session(
         settings,
         feed,
@@ -1154,6 +1176,7 @@ async def build_session_from_settings(
         tier1_news_enabled=tier1_news_enabled,
         news_analysis_enabled=news_analysis_enabled,
         sonnet_escalation_enabled=sonnet_escalation_enabled,
+        jev_enabled=jev_enabled,
     )
 
 

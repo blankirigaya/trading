@@ -19,6 +19,7 @@ POSITION_COUNT_CAP_DISABLED_KEY = "position_count_cap_disabled"
 TIER1_NEWS_ENABLED_KEY = "tier1_news_enabled"
 NEWS_ANALYSIS_ENABLED_KEY = "news_analysis_enabled"
 SONNET_ESCALATION_ENABLED_KEY = "sonnet_escalation_enabled"
+JEV_ENABLED_KEY = "jev_enabled"
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 
 
@@ -139,6 +140,15 @@ class ControlStore:
 
     async def set_sonnet_escalation_enabled(self, enabled: bool) -> bool:
         return await self._set_flag(SONNET_ESCALATION_ENABLED_KEY, enabled)
+
+    def get_jev_enabled_sync(self, default: bool = True) -> bool:
+        return self._get_flag_sync(JEV_ENABLED_KEY, default)
+
+    async def get_jev_enabled(self, default: bool = True) -> bool:
+        return await self._get_flag(JEV_ENABLED_KEY, default)
+
+    async def set_jev_enabled(self, enabled: bool) -> bool:
+        return await self._set_flag(JEV_ENABLED_KEY, enabled)
 
     def _set_sync(self, key: str, value: str) -> None:
         with Session(self.engine) as session:

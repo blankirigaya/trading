@@ -14,7 +14,7 @@ export function System() {
   const { data: status } = useSystemStatus()
   const { data: market } = useMarketStatus()
   const streamState = useLiveEvents((state) => state.streamState)
-  const [pending, setPending] = useState<'kill-switch' | 'reset' | 'capital-cap' | 'position-cap' | 'tier1-news' | 'news-analysis' | 'sonnet-escalation' | null>(null)
+  const [pending, setPending] = useState<'kill-switch' | 'reset' | 'capital-cap' | 'position-cap' | 'tier1-news' | 'news-analysis' | 'sonnet-escalation' | 'jev' | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
 
   const refresh = () => {
@@ -48,6 +48,7 @@ export function System() {
   const escalationOn = status.sonnet_escalation_enabled !== false
   const escalationsToday = status.sonnet_escalations_today ?? 0
   const escalationCap = status.ai_max_sonnet_escalations_per_day ?? 20
+  const jevOn = status.jev_enabled !== false
 
   return (
     <div>
@@ -147,7 +148,9 @@ export function System() {
           <dt>Last AI error</dt>
           <dd>{status.last_ai_error ?? 'none'}</dd>
           <dt>Jev enabled</dt>
-          <dd>{String(status.jev_enabled)}</dd>
+          <dd data-testid="system-jev">
+            {jevOn ? 'ON · every proposal gets a critique' : 'OFF · AI proposals go straight through (SKIPPED)'}
+          </dd>
           <dt>Jev model</dt>
           <dd>{status.jev_model ?? 'not configured'}</dd>
           <dt>Database</dt>
@@ -240,6 +243,15 @@ export function System() {
           </button>
           <button
             type="button"
+            className="btn"
+            disabled={busy !== null}
+            onClick={() => setPending('jev')}
+            data-testid="control-jev"
+          >
+            {jevOn ? 'Disable Jev' : 'Enable Jev'}
+          </button>
+          <button
+            type="button"
             className="btn danger"
             disabled={busy !== null}
             onClick={() => setPending('kill-switch')}
@@ -326,11 +338,26 @@ export function System() {
           body={
             escalationOn
               ? `News-triggered reviews go back to the cheap cadence model. The ${escalationsToday} Sonnet review(s) already used today stay journalled.`
-              : `News-triggered reviews run on Sonnet instead of the cadence model, bounded at ${escalationCap} per day. Routine 60s reviews stay on the cheap model.`
+              : `News-triggered reviews run on Sonnet instead of the cadence model, bounded at ${escalationCap} per day. Routine 120s reviews stay on the cheap model.`
           }
           confirmLabel={escalationOn ? 'Turn off' : 'Turn on'}
           onCancel={() => setPending(null)}
           onConfirm={() => run('sonnet-escalation', () => api.setSonnetEscalation(!escalationOn))}
+        />
+      ) : null}
+
+      {pending === 'jev' ? (
+        <ConfirmDialog
+          testId="jev-dialog"
+          title={jevOn ? 'Disable the Jev critic?' : 'Enable the Jev critic?'}
+          body={
+            jevOn
+              ? 'AI proposals go straight through with no critique, no reconsideration, and no Jev entry gate. The journal records SKIPPED for each review. Desk plan gates, safety caps, and deterministic exits still apply. Takes effect at once, no restart.'
+              : 'Every AI proposal gets a Jev critique again, with reconsideration and the entry score gate back in force. Takes effect at once, no restart.'
+          }
+          confirmLabel={jevOn ? 'Disable Jev' : 'Enable Jev'}
+          onCancel={() => setPending(null)}
+          onConfirm={() => run('jev', () => api.setJev(!jevOn))}
         />
       ) : null}
 

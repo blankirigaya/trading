@@ -135,6 +135,7 @@ async def system_status(request: Request) -> dict[str, object]:
     app = container(request)
     session = _session(app)
     universe_mode = session.universe_mode if session is not None else await app.get_universe_mode()
+    jev_enabled = session.jev_enabled if session is not None else await app.get_jev_enabled()
     return {
         "mode": app.settings.app_mode,
         "environment": app.settings.app_env,
@@ -149,8 +150,8 @@ async def system_status(request: Request) -> dict[str, object]:
         "ai_server": app.configured_ai_server,
         "ai_model": app.settings.ai_model,
         "ai_inference_location": "remote",
-        "jev_enabled": app.settings.jev_enabled,
-        "jev_model": app.settings.jev_model if app.settings.jev_enabled else None,
+        "jev_enabled": jev_enabled,
+        "jev_model": app.settings.jev_model if jev_enabled else None,
         "kill_switch_state": app.kill_switch.enabled,
         "session_running": app.runtime is not None and app.runtime.running,
         "shadow_symbols": _watched_symbols(app),
@@ -814,6 +815,27 @@ async def control_sonnet_escalation(
         )
     )
     return {"sonnet_escalation_enabled": applied, "live_order_execution": False}
+
+
+@router.post("/control/jev")
+async def control_jev(request: Request, enabled: bool = True) -> dict[str, object]:
+    """Turn the Jev critic on or off. Persisted, applied immediately.
+
+    When off, the AI's proposal goes straight through with no critique, no
+    reconsideration, and no Jev entry gate; the journal records SKIPPED. The
+    desk plan gates, safety caps, and deterministic exits still apply.
+    """
+    app = container(request)
+    applied = await app.set_jev_enabled(enabled)
+    app.event_hub.publish(
+        new_event(
+            "SYSTEM",
+            "jev",
+            f"Jev critic {'ENABLED' if applied else 'DISABLED'}",
+            data={"jev_enabled": applied},
+        )
+    )
+    return {"jev_enabled": applied, "live_order_execution": False}
 
 
 @router.post("/agent/review")

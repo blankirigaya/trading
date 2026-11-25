@@ -141,5 +141,11 @@ export const api = {
       '/control/sonnet-escalation',
       { enabled: String(enabled) },
     ),
+  // Jev critic kill switch; applied immediately, no restart.
+  setJev: (enabled: boolean) =>
+    postWith<{ jev_enabled: boolean; live_order_execution: boolean }>(
+      '/control/jev',
+      { enabled: String(enabled) },
+    ),
   resetPaper: () => post<{ status: string; execution_provider: string }>('/paper/reset'),
 }

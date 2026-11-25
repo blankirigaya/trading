@@ -83,6 +83,10 @@ class Container:
         self._news_analysis_loaded = False
         self.sonnet_escalation_enabled: bool = self.settings.sonnet_escalation_enabled
         self._sonnet_escalation_loaded = False
+        # Jev critic kill switch, same lifecycle: when False the AI's proposal
+        # goes through with no critique, no reconsideration, and no entry gate.
+        self.jev_enabled: bool = self.settings.jev_enabled
+        self._jev_enabled_loaded = False
         self.broker = PaperBroker(
             self.settings.paper_initial_capital,
             self.clock,
@@ -201,6 +205,8 @@ class Container:
             self._news_analysis_loaded = True
             self.sonnet_escalation_enabled = session.sonnet_escalation_enabled
             self._sonnet_escalation_loaded = True
+            self.jev_enabled = session.jev_enabled
+            self._jev_enabled_loaded = True
             # The API reads the paper books and journal off the container, so point
             # them at the live session's stores once it owns trading.
             self.shard_brokers = [shard.broker for shard in session.shards]
@@ -438,6 +444,37 @@ class Container:
         self._sonnet_escalation_loaded = True
         await self._apply_news_switches()
         return applied
+
+    async def get_jev_enabled(self) -> bool:
+        """Persisted Jev lever, loaded once per process."""
+        if not self._jev_enabled_loaded:
+            try:
+                self.jev_enabled = await self._control_store().get_jev_enabled(
+                    self.settings.jev_enabled
+                )
+            except Exception:
+                # A control-table hiccup must not take down status reporting.
+                self.jev_enabled = self.settings.jev_enabled
+            self._jev_enabled_loaded = True
+            await self._apply_jev_switch()
+        return self.jev_enabled
+
+    async def set_jev_enabled(self, enabled: bool) -> bool:
+        applied = await self._control_store().set_jev_enabled(enabled)
+        self.jev_enabled = applied
+        self._jev_enabled_loaded = True
+        await self._apply_jev_switch()
+        return applied
+
+    async def _apply_jev_switch(self) -> None:
+        """Push the Jev kill switch into the live session, no restart."""
+        runtime = self.runtime
+        session = (
+            runtime.session if isinstance(runtime, ManagedShadowRuntime) else None
+        )
+        if session is not None:
+            session.set_jev_enabled(self.jev_enabled)
+            session.jev_enabled = self.jev_enabled
 
     async def _apply_news_switches(self) -> None:
         """Push the news kill switches into every live consumer, no restart."""
