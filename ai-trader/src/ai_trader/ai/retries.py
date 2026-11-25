@@ -58,10 +58,14 @@ class RetryingAIProvider(AIProvider):
                 # Name the broken field: a generic "try again" invites the same
                 # mistake, while a field-level correction usually fixes it on the
                 # first retry. The detail is bounded by SchemaValidationError.
+                # The correction names the transport too: this provider only
+                # accepts tool calls, so asking for "valid JSON" would invite a
+                # raw-JSON reply that can never validate.
                 prompt = (
                     f"{user_prompt}\nYour prior output failed schema validation"
                     + (f": {detail}" if detail else "")
-                    + ". Return only valid JSON for the requested schema."
+                    + ". Call the required tool again with the complete response"
+                    + " as its input; do not reply with plain text or raw JSON."
                 )
                 continue
             updated = metadata.model_copy(

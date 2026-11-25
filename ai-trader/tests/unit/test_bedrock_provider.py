@@ -614,3 +614,63 @@ def test_main_model_is_untouched_by_the_cadence_flag():
 
     assert isinstance(provider, BedrockAIProvider)
     assert provider.model_id == "main-model"
+
+
+async def test_single_key_envelope_around_valid_payload_is_unwrapped():
+    # Seen live: Haiku returned the full decision nested under
+    # "$PARAMETER_NAME", which failed validation as missing every field.
+    fake = FakeBedrockClient([_tool_response({"$PARAMETER_NAME": _valid_portfolio_payload()})])
+    provider = _provider(fake)
+
+    parsed, _ = await provider.structured_completion(
+        "system prompt",
+        "user prompt",
+        PortfolioDecision,
+        prompt_name="portfolio_manager",
+        prompt_version="v21",
+    )
+
+    assert isinstance(parsed, PortfolioDecision)
+    assert parsed.cash_percent == 100
+
+
+async def test_input_envelope_still_unwrapped():
+    fake = FakeBedrockClient([_tool_response({"input": _valid_portfolio_payload()})])
+    provider = _provider(fake)
+
+    parsed, _ = await provider.structured_completion(
+        "system prompt",
+        "user prompt",
+        PortfolioDecision,
+        prompt_name="portfolio_manager",
+        prompt_version="v21",
+    )
+
+    assert isinstance(parsed, PortfolioDecision)
+
+
+async def test_single_string_field_is_not_unwrapped():
+    # EchoResponse has one field whose value is a string, not a dict:
+    # the unwrap loop must leave it alone.
+    fake = FakeBedrockClient([_tool_response({"answer": "ok"})])
+    provider = _provider(fake)
+
+    parsed, _ = await provider.structured_completion(
+        "system prompt", "user prompt", EchoResponse, prompt_name="x", prompt_version="v1"
+    )
+
+    assert parsed.answer == "ok"
+
+
+async def test_empty_tool_input_still_fails_closed():
+    fake = FakeBedrockClient([_tool_response({})])
+    provider = _provider(fake)
+
+    with pytest.raises(SchemaValidationError):
+        await provider.structured_completion(
+            "system prompt",
+            "user prompt",
+            PortfolioDecision,
+            prompt_name="portfolio_manager",
+            prompt_version="v21",
+        )

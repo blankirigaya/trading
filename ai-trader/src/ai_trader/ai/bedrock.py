@@ -312,13 +312,21 @@ class BedrockAIProvider(AIProvider):
 
                 # Local Pydantic validation intentionally happens outside transport handling so
                 # the shared schema-retry wrapper can distinguish malformed output.
+                raw_tool_input: object = None
                 try:
-                    parsed = response_model.model_validate(self._tool_input(response))
+                    raw_tool_input = self._tool_input(response)
+                    parsed = response_model.model_validate(raw_tool_input)
                 except ValidationError as exc:
                     # Carry the field-level reason: the retry prompt and the
                     # decision record both need to say WHAT was wrong, otherwise
                     # the model repeats the same mistake and the operator is blind.
+                    # Also carry a snippet of the actual tool input: an empty or
+                    # skeleton input (the usual cause of an all-fields-missing
+                    # error) is otherwise invisible after the fact.
                     detail = summarize_validation_errors(exc)
+                    if raw_tool_input is not None:
+                        snippet = str(raw_tool_input)
+                        detail = f"{detail} | tool input: {snippet[:300]}"
                     self.health.record_failure("AI response failed schema validation")
                     logger.warning(
                         "bedrock response failed schema validation",
@@ -326,6 +334,9 @@ class BedrockAIProvider(AIProvider):
                             "model_id": self.model_id,
                             "outcome": "schema_invalid",
                             "schema_detail": detail,
+                            "raw_tool_input": (
+                                str(raw_tool_input)[:500] if raw_tool_input is not None else None
+                            ),
                         },
                     )
                     raise SchemaValidationError(detail) from exc
@@ -540,15 +551,21 @@ class BedrockAIProvider(AIProvider):
         if tool_use.get("name") != _TOOL_NAME or "input" not in tool_use:
             raise BedrockAIUnavailable("Bedrock returned an unexpected structured result")
         structured = tool_use["input"]
-        if (
-            isinstance(structured, dict)
-            and set(structured.keys()) == {"input"}
-            and isinstance(structured["input"], dict)
-        ):
-            # Some models wrap the tool payload in an extra {"input": {...}}
-            # envelope. Unwrap it; a genuine decision object never has a
-            # top-level "input" key, so this cannot mask a real schema error.
-            structured = structured["input"]
+        while isinstance(structured, dict) and len(structured) == 1:
+            (key, value) = next(iter(structured.items()))
+            if not isinstance(value, dict):
+                break
+            # Some models wrap the tool payload in an extra single-key
+            # envelope ({"input": {...}}, {"$PARAMETER_NAME": {...}}, ...).
+            # Unwrap it: no genuine decision object has a single top-level
+            # key, so this cannot mask a real schema error. Seen live on
+            # Haiku cadence reviews where the valid decision arrived nested
+            # under "$PARAMETER_NAME" and failed validation as a result.
+            logger.debug(
+                "bedrock tool input arrived in a single-key envelope; unwrapping",
+                extra={"envelope_key": key},
+            )
+            structured = value
         return structured
 
     @staticmethod
